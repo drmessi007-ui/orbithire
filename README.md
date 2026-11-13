@@ -35,7 +35,7 @@ AI agents that sell a service need a way to get paid that does not require the b
                                                                      • re-reads the tx on-chain: success, target
                                                                        contract, exact fee, query hash
                                                                      • NOAA SWPC Kp index  or  ISS pass over
-                                                                       Osorno (CelesTrak TLE + satellite.js)
+                                                                       a Chilean city (CelesTrak + satellite.js)
                                 orbit-hire.submit_report  ◄───────── • signs with the agent account
                                 • moves fee to orbit-treasury escrow
                                 orbit-hire.confirm_report_received ◄ • confirms the same report hash
@@ -48,7 +48,7 @@ AI agents that sell a service need a way to get paid that does not require the b
 2. **OrbitHire contract** (`contracts/orbit-hire`): validates the exact fee, the canonical UUID v4, the query (non-empty, max 500 chars, allowlisted characters) and the per-account rate limit. It stores the SHA-256 of the query and holds the fee as a liability. It emits a NEP-297-style `request_created` event.
 3. **Agent** (`agent/`): learns about requests from `POST /api/notify` (sent by the frontend after payment), from a finalized-block scanner, and from a periodic sweep of contract state. It never trusts the notification: it fetches the transaction and checks success, receiver contract, attached deposit against `get_fee`, request ID, and that `sha256(query)` matches the on-chain commitment. Then it builds the report:
    - questions about geomagnetic storms or space weather: latest planetary **Kp index** from `services.swpc.noaa.gov`;
-   - questions about the ISS or passes over Osorno: next ISS pass above 10° over Osorno, Chile in the next 24 h, computed from **CelesTrak** orbital elements with `satellite.js`.
+   - questions about the ISS: next ISS pass above 10° over the Chilean city named in the question (Osorno if none is named) in the next 24 h, computed from **CelesTrak** orbital elements with `satellite.js`. Supported cities: Arica, Iquique, Antofagasta, Calama, Copiapó, La Serena, Coquimbo, Valparaíso, Viña del Mar, Santiago, Rancagua, Talca, Chillán, Concepción, Temuco, Valdivia, Osorno, Puerto Montt, Coyhaique and Punta Arenas (accent- and case-insensitive). If the question names another place (e.g. "sobre Puerto Varas"), the agent fails the request with a clear "unsupported city" message listing the supported cities instead of silently answering for Osorno.
 4. **Receipt and payment:** the agent calls `submit_report(request_id, report_hash, …)`. The contract moves the fee into **OrbitTreasury** escrow (`lock_funds`). The agent then calls `confirm_report_received` with the same hash and the treasury transfers the fee to the agent account. Only the configured agent account can submit or confirm.
 5. **Refunds:** if the request is not settled, the requester can call `claim_refund` after the 24-hour refund window. A request rejected after human review can be refunded immediately.
 6. **Status API:** the frontend polls `GET /api/requests/{request_id}` and shows the stages: Pago enviado → Verificando en la cadena → En cola → Procesando → Registrando recibo → Completado. The UI is in Spanish.
@@ -60,7 +60,8 @@ The agent matches simple keyword rules (Spanish or English); it is not a general
 | Ask something like | Data source | Result |
 | --- | --- | --- |
 | "¿Hay tormenta geomagnética hoy?" / "space weather now?" | NOAA SWPC `planetary_k_index_1m.json` | Latest Kp and whether it is storm level (Kp ≥ 5) |
-| "¿A qué hora pasa la ISS sobre Osorno?" / "ISS pass" | CelesTrak GP elements for NORAD 25544 | Next pass window (UTC) and max elevation |
+| "¿A qué hora pasa la ISS sobre Santiago?" / "ISS over Punta Arenas" / "ISS pass" | CelesTrak GP elements for NORAD 25544 + city table in `agent/src/iss-location.js` | Next pass window over that city in Chile time (America/Santiago) and UTC, max elevation (Osorno when no city is named) |
+| "ISS sobre Puerto Varas" (city not in the list) | — | Fails with `No reconozco la ciudad "puerto varas"…` and the list of supported cities; refundable after 24 h |
 
 Anything else (for example "size of the moon") fails with `Query does not match a supported NOAA or ISS request`. The fee then stays in escrow and can be refunded after 24 h. The 1-hour rate limit still applies, because it starts when you pay.
 
@@ -72,7 +73,7 @@ Anything else (for example "size of the moon") fails with `Query does not match 
 2. Open https://drmessi007-ui.github.io/orbithire-frontend/ → you see the OrbitHire page with the agent status and a disabled pay button.
 3. Click connect, choose Meteor Wallet, approve → your `*.testnet` account appears and the pay button becomes active.
 4. Type `¿A qué hora pasa la ISS sobre Osorno?` and click **Pagar y consultar** → Meteor asks you to approve a 0.1 NEAR call to `orbit-hire.shortemail369.testnet`.
-5. Approve → the result panel shows the live stages, then the report text (e.g. `ISS pass over Osorno: approximately … UTC; maximum elevation about … degrees`), the request ID and a link to the transaction on the testnet explorer. The entry is saved in the per-wallet history.
+5. Approve → the result panel shows the live stages, then the report text (e.g. `ISS pass over Osorno, Chile: approximately 06:45 to 06:51 Chile time, Sat, 14 Nov 2026 (America/Santiago, UTC-3); 2026-11-14 09:45 to 09:51 UTC; maximum elevation about 31 degrees…`), the request ID and a link to the transaction on the testnet explorer. The entry is saved in the per-wallet history.
 6. Try paying again right away → the page shows a countdown. The contract allows one request per account per hour.
 7. Check the chain yourself:
    ```bash
@@ -95,7 +96,7 @@ cargo build --release --target wasm32-unknown-unknown
 # Agent: unit tests (chain-event verification, block scanner, retry policy)
 cd agent
 npm ci
-npm test        # → 18 tests, 0 failures
+npm test        # → 24 tests, 0 failures
 npm run check   # → syntax check of the agent sources
 ```
 

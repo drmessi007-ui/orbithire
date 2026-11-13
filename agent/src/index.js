@@ -27,6 +27,11 @@ import {
   rateLimitRpc,
   scanHeights,
 } from "./block-scanner.js";
+import {
+  formatIssPassReport,
+  resolveIssLocation,
+  UnsupportedLocationError,
+} from "./iss-location.js";
 
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(sourceDir, "../..");
@@ -651,7 +656,10 @@ async function createGeomagneticReport() {
   return `NOAA planetary K-index: ${kp.toFixed(1)} at ${latest.time_tag}. ${storm}`;
 }
 
-async function createIssReport() {
+async function createIssReport(query) {
+  const location = resolveIssLocation(query);
+  if (location.unknownPlace) throw new UnsupportedLocationError(location.unknownPlace);
+  const { city, defaulted } = location;
   const elements = await fetchJson(
     "https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=JSON",
   );
@@ -667,9 +675,9 @@ async function createIssReport() {
     });
   }
   const observer = {
-    longitude: satellite.degreesToRadians(-73.135),
-    latitude: satellite.degreesToRadians(-40.574),
-    height: 0.04,
+    longitude: satellite.degreesToRadians(city.longitude),
+    latitude: satellite.degreesToRadians(city.latitude),
+    height: city.height,
   };
   const start = Date.now();
   const end = start + 24 * 60 * 60 * 1000;
@@ -690,16 +698,19 @@ async function createIssReport() {
     }
   }
   if (!visiblePass && activePass) visiblePass = { ...activePass, set: end };
-  if (!visiblePass) return "CelesTrak ISS elements were updated, but no pass above 10 degrees is predicted over Osorno in the next 24 hours.";
-  return `ISS pass over Osorno: approximately ${new Date(visiblePass.rise).toISOString()} to ${new Date(visiblePass.set).toISOString()} UTC; maximum elevation about ${satellite.radiansToDegrees(visiblePass.maxElevation).toFixed(0)} degrees. Prediction uses current CelesTrak orbital elements and is approximate.`;
+  return formatIssPassReport(city, visiblePass, { defaulted });
 }
 
 async function createReport(query) {
   if (/geomagn[eé]t|tormenta solar|tormenta geomagn|space weather/iu.test(query)) {
     return createGeomagneticReport();
   }
-  if (/iss|estaci[oó]n espacial|sobre osorno|international space station/iu.test(query)) {
-    return createIssReport();
+  if (
+    /iss|estaci[oó]n espacial(?: internacional)?|estacion espacial internacional|sobre osorno|international space station/iu.test(
+      query,
+    )
+  ) {
+    return createIssReport(query);
   }
   throw new Error("Query does not match a supported NOAA or ISS request");
 }
@@ -938,7 +949,9 @@ async function processChainRequest(requestId) {
 
     const reason = isTransientError(error)
       ? `No se pudo completar la consulta después de ${MAX_REQUEST_ATTEMPTS} intentos.`
-      : "No se pudo completar la consulta.";
+      : error instanceof UnsupportedLocationError
+        ? error.userMessage
+        : "No se pudo completar la consulta.";
     console.error(
       `Request ${requestId} was not completed after attempt ${attemptNumber || 0}; it remains eligible for timeout refund: ${error.message}`,
     );

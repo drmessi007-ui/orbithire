@@ -79,7 +79,8 @@ const inMemoryRequestCooldowns = new Map();
 const chainCooldowns = new Map();
 const chainCooldownRequests = new Set();
 let rateLimitWindowMs = REQUEST_RATE_LIMIT_MS;
-let rateLimitWindowLoaded = false;
+let rateLimitWindowLoadedAt = 0;
+const RATE_LIMIT_WINDOW_CACHE_MS = 5 * 60 * 1000;
 let cooldownTimer;
 let cooldownAccountId = null;
 const requestHistoryCache = new Map();
@@ -310,7 +311,21 @@ function readLocalCooldownUntil(accountId) {
   } catch (error) {
     console.warn("No se pudo leer el límite local de solicitudes:", error);
   }
-  const localCooldown = Math.max(memoryCooldown, storedCooldown);
+  let localCooldown = Math.max(memoryCooldown, storedCooldown);
+  // A local record can never legitimately end more than one window from now.
+  // If the on-chain window was shortened (e.g. 1 h -> 60 s), rebase records
+  // written with the old default window onto the window read from chain.
+  if (
+    rateLimitWindowLoadedAt &&
+    localCooldown > Date.now() + rateLimitWindowMs + CHAIN_FINALITY_GRACE_MS
+  ) {
+    localCooldown = localCooldown - REQUEST_RATE_LIMIT_MS + rateLimitWindowMs;
+    if (localCooldown > Date.now()) {
+      storeLocalCooldown(accountId, localCooldown);
+    } else {
+      clearLocalCooldown(accountId);
+    }
+  }
   return localCooldown > Date.now() ? localCooldown : 0;
 }
 
@@ -415,7 +430,9 @@ async function viewContractState(prefixBytes) {
 }
 
 async function loadRateLimitWindow() {
-  if (rateLimitWindowLoaded) return rateLimitWindowMs;
+  if (rateLimitWindowLoadedAt && Date.now() - rateLimitWindowLoadedAt < RATE_LIMIT_WINDOW_CACHE_MS) {
+    return rateLimitWindowMs;
+  }
   const stateKey = new TextEncoder().encode("STATE");
   const values = await viewContractState(stateKey);
   const entry = values.find((value) => value.key === bytesToBase64(stateKey));
@@ -430,11 +447,11 @@ async function loadRateLimitWindow() {
   if (fee !== BigInt(FEE_YOCTO)) throw new Error("formato de STATE inesperado");
   offset += 16;
   const windowMs = Number(readUnsignedLE(bytes, offset, 8) / 1000000n);
-  if (windowMs < 60 * 1000 || windowMs > 7 * 24 * 60 * 60 * 1000) {
+  if (windowMs < 1000 || windowMs > 7 * 24 * 60 * 60 * 1000) {
     throw new Error("ventana de límite fuera de rango");
   }
   rateLimitWindowMs = windowMs;
-  rateLimitWindowLoaded = true;
+  rateLimitWindowLoadedAt = Date.now();
   return rateLimitWindowMs;
 }
 
@@ -481,13 +498,33 @@ function formatCooldown(remainingMs) {
   return minutes > 0 ? `${minutes} min ${seconds} s` : `${remainingSeconds} s`;
 }
 
+// Human label for the contract's rate-limit window (read from chain STATE).
+function rateLimitWindowLabel(windowMs = rateLimitWindowMs) {
+  const minutes = Math.round(windowMs / 60000);
+  if (windowMs < 60000) return `los últimos ${Math.max(1, Math.round(windowMs / 1000))} segundos`;
+  if (minutes === 1) return "el último minuto";
+  if (minutes < 60) return `los últimos ${minutes} minutos`;
+  if (minutes === 60) return "la última hora";
+  if (minutes % 60 === 0) return `las últimas ${minutes / 60} horas`;
+  return `los últimos ${minutes} minutos`;
+}
+
+function rateLimitPeriodLabel(windowMs = rateLimitWindowMs) {
+  const minutes = Math.round(windowMs / 60000);
+  if (minutes <= 1) return "cada minuto";
+  if (minutes < 60) return `cada ${minutes} minutos`;
+  if (minutes === 60) return "cada hora";
+  if (minutes % 60 === 0) return `cada ${minutes / 60} horas`;
+  return `cada ${minutes} minutos`;
+}
+
 function cooldownNoteText(cooldownUntil) {
   const remaining = cooldownUntil - Date.now();
   const availableAt = new Date(cooldownUntil).toLocaleTimeString("es-CL", {
     hour: "2-digit",
     minute: "2-digit",
   });
-  return `Esta cuenta ya tiene una solicitud registrada en la última hora (límite del contrato). Podrás pagar de nuevo en ${formatCooldown(remaining)} · a las ${availableAt}.`;
+  return `Esta cuenta ya tiene una solicitud registrada en ${rateLimitWindowLabel()} (límite del contrato). Podrás pagar de nuevo en ${formatCooldown(remaining)} · a las ${availableAt}.`;
 }
 
 function syncCooldownTimer(accountId, cooldownUntil) {
@@ -1447,7 +1484,7 @@ async function submitQuery() {
   if (cooldownUntil > Date.now()) {
     showStatus("Límite de solicitudes activo", "warning");
     showMessage(
-      `El contrato permite una solicitud por cuenta cada hora. ${cooldownNoteText(cooldownUntil)}`,
+      `El contrato permite una solicitud por cuenta ${rateLimitPeriodLabel()}. ${cooldownNoteText(cooldownUntil)}`,
     );
     updateWalletUi();
     return;
@@ -1608,7 +1645,7 @@ async function submitQuery() {
       statusForAccount("El contrato rechazó la solicitud", "warning");
       messageForAccount(
         rateLimited
-          ? "El contrato rechazó la llamada: esta cuenta ya tiene una solicitud en la última hora. El depósito se devuelve automáticamente; espera a que venza el límite."
+          ? `El contrato rechazó la llamada: esta cuenta ya tiene una solicitud en ${rateLimitWindowLabel()}. El depósito se devuelve automáticamente; espera a que venza el límite.`
           : `El contrato rechazó la llamada; el depósito se devuelve automáticamente. ${errorMessage}`,
         requestId,
         transactionHash,
@@ -1632,7 +1669,7 @@ async function submitQuery() {
         rateLimited || /WebAssembly trap|unreachable opcode|Smart contract panicked/i.test(errorMessage);
       messageForAccount(
         contractTrap
-          ? `El contrato rechazó la llamada. Cada intento usa un request_id nuevo, pero OrbitHire acepta una solicitud por cuenta cada hora. Si esta cuenta ya tuvo una solicitud exitosa en la última hora, espera a que venza ese límite. ${errorMessage}`
+          ? `El contrato rechazó la llamada. Cada intento usa un request_id nuevo, pero OrbitHire acepta una solicitud por cuenta ${rateLimitPeriodLabel()}. Si esta cuenta ya tuvo una solicitud exitosa en ${rateLimitWindowLabel()}, espera a que venza ese límite. ${errorMessage}`
           : `La wallet no confirmó el pago. Si no aprobaste la transacción, no se envió ninguna consulta. ${errorMessage}`,
         requestId,
       );
