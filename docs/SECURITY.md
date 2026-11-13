@@ -7,7 +7,7 @@ Scope: OrbitHire testnet prototype, as deployed on 2026-11-13. Not audited.
 **Contracts**
 - Exact-fee check on `request_service`; canonical UUID v4 request IDs; duplicate IDs rejected.
 - Query validation in `orbit-common`: non-empty, max 500 characters, character allowlist (letters, digits, whitespace, limited punctuation).
-- Per-account rate limit: one request per window (default 1 hour, owner-configurable with `set_rate_limit_window_ns`). The window starts at payment time.
+- Per-account rate limit: one request per window (code default 1 hour; the testnet deployment is set to 60 seconds by the owner with `set_rate_limit_window_ns`). The window starts at payment time.
 - Escrow: the fee is held by `orbit-hire`. It moves to `orbit-treasury` only when the agent submits a report hash, and is released to the agent only after `confirm_report_received` with the same hash.
 - Role checks: only the configured agent can submit or confirm; only the requester can claim a refund or dispute; only the owner can pause, change the rate limit or resolve reviews. The treasury accepts lock, release and refund only from `orbit-hire`.
 - Refunds: `claim_refund` after the 24-hour window, or immediately after a rejected human review. Expired requests stuck while locking have a rescue path.

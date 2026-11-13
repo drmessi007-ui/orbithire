@@ -95,7 +95,7 @@ Config (server environment only): `NEARAI_API_KEY`, `NEARAI_BASE_URL`, `NEARAI_M
 3. Click connect, choose Meteor Wallet, approve → your `*.testnet` account appears and the pay button becomes active.
 4. Type `¿A qué hora pasa la ISS sobre Osorno?` and click **Pagar y consultar** → Meteor asks you to approve a 0.1 NEAR call to `orbit-hire.shortemail369.testnet`.
 5. Approve → the result panel shows the live stages, then the report text (e.g. `ISS pass over Osorno, Chile: approximately 06:45 to 06:51 Chile time, Sat, 14 Nov 2026 (America/Santiago, UTC-3); 2026-11-14 09:45 to 09:51 UTC; maximum elevation about 31 degrees…`), the request ID and a link to the transaction on the testnet explorer. The entry is saved in the per-wallet history.
-6. Try paying again right away → the page shows a countdown. The contract allows one request per account per hour.
+6. Try paying again right away → the page shows a countdown. The contract allows one request per account per minute (the demo window is 60 s, set on-chain by the owner).
 7. Check the chain yourself:
    ```bash
    curl -s https://rpc.testnet.near.org -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"query","params":{"request_type":"call_function","finality":"final","account_id":"orbit-hire.shortemail369.testnet","method_name":"get_request_status","args_base64":"'$(printf '{"request_id":"<YOUR_REQUEST_ID>"}' | base64 -w0)'"}}'
@@ -177,7 +177,7 @@ The deployed testnet Wasm is byte-identical (same SHA-256) to a release build of
 - **No keys in the browser.** Meteor Wallet signs the payment. The agent key lives only in the server environment; it is the agent account's own key, never the owner key.
 - **The agent verifies everything on-chain** (transaction status, receiver, exact fee, query commitment) before doing work. `/api/notify` is origin-restricted, size-limited and rate-limited, and it is only a hint.
 - **Escrow, not trust:** the fee only moves to the agent after a report hash is on-chain. Unsettled requests are refundable after 24 h.
-- **Rate limit:** one `request_service` per account per hour (owner-configurable). It also counts failed requests, because it starts at payment time.
+- **Rate limit:** one `request_service` per account per window, currently 60 seconds on testnet (owner-configurable with `set_rate_limit_window_ns`). It also counts failed requests, because it starts at payment time.
 - **The query is public.** NEAR transaction arguments are public; only the hash is kept in state. Do not submit sensitive data. This is not a full commit-reveal scheme.
 - **LLMs (NEAR AI Cloud, OpenAI fallback) are sandboxed:** the query is untrusted data, the model output is limited to an allow-listed intent and fact-checked prose, and it never touches payments or signing. See `docs/SECURITY.md`.
 - **Prompt-injection guard (Jev / TypeSafe)** is implemented as a hook in the agent (`JEV_API_KEY`). **On the live demo it currently runs in simulation mode**, so it is not an active security control. The contract cannot attest that a guard ran.
