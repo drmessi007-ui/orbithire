@@ -27,7 +27,7 @@ import {
   scanHeights,
 } from "./block-scanner.js";
 import { UnsupportedLocationError } from "./iss-location.js";
-import { createNearAiClient, loadNearAiConfig } from "./nearai.js";
+import { createLlmProviders } from "./llm.js";
 import { buildReport, UnsupportedQueryError } from "./report-pipeline.js";
 
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
@@ -42,12 +42,11 @@ if (config.jevApiKey) {
 const provider = new JsonRpcProvider({ url: config.rpcUrl });
 const account = new Account(config.agentAccountId, provider, config.agentPrivateKey);
 const jev = config.jevApiKey ? new TypeSafeClient() : null;
-const nearAiConfig = loadNearAiConfig();
-const nearAi = createNearAiClient(nearAiConfig);
+const llmProviders = createLlmProviders();
 console.log(
-  nearAi.enabled
-    ? `NEAR AI Cloud enabled (model ${nearAiConfig.model}, timeout ${nearAiConfig.timeoutMs}ms); deterministic fallback active.`
-    : "NEAR AI Cloud disabled (no NEARAI_API_KEY); using deterministic classifier and template reports.",
+  llmProviders.length
+    ? `LLM providers (in order): ${llmProviders.map((c) => `${c.name}:${c.model}`).join(", ")}; local deterministic fallback active.`
+    : "No LLM provider configured; using deterministic classifier and template reports.",
 );
 const requests = new Map();
 const processing = new Set();
@@ -657,7 +656,7 @@ async function fetchJson(url) {
 async function createReport(query) {
   const { report } = await buildReport(query, {
     fetchJson,
-    nearAi,
+    llm: llmProviders,
     log: (meta) => console.log(`Report pipeline: ${JSON.stringify(meta)}`),
   });
   return report;

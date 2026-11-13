@@ -9,7 +9,7 @@ import {
   supportedCityNames,
   UnsupportedLocationError,
 } from "./iss-location.js";
-import { classifyQuery, writeAiReport } from "./nearai.js";
+import { classifyQuery, writeAiReport } from "./llm.js";
 
 export const MAX_REPORT_CHARS = 3000;
 export const NOAA_KP_URL = "https://services.swpc.noaa.gov/json/planetary_k_index_1m.json";
@@ -120,39 +120,52 @@ export function composeReport(aiText, template) {
   return report.length <= MAX_REPORT_CHARS ? report : template;
 }
 
+function reasonOf(error) {
+  return error?.name === "LlmError" ? error.message : "error";
+}
+
 /**
- * Build the report for a query. Returns { report, meta } where meta is safe to log
- * (no query text, no prompts, no secrets).
+ * Build the report for a query. Providers are tried in order (NEAR AI Cloud, then
+ * OpenAI) for classification and for writing; the local regex/template pipeline is
+ * the final fallback. Returns { report, meta }; meta is safe to log (no query text,
+ * no prompts, no secrets).
  */
-export async function buildReport(query, { fetchJson, nearAi = null, log = () => {}, now } = {}) {
-  const meta = { intent: null, classifier: "regex", writer: "template", model: nearAi?.model || null };
+export async function buildReport(query, { fetchJson, llm, nearAi = null, log = () => {}, now } = {}) {
+  const providers = (llm ?? (nearAi ? [nearAi] : [])).filter((client) => client?.enabled);
+  const meta = { intent: null, classifier: "regex", writer: "template", model: null, fallbacks: [] };
   const regexIntent = regexClassify(query);
   let intent = regexIntent;
   let aiCity = null;
   let language = null;
-  let aiAvailable = Boolean(nearAi?.enabled);
+  // Providers that were unreachable in this request are not retried for writing.
+  const unreachable = new Set();
 
-  if (aiAvailable) {
+  const classifyStarted = Date.now();
+  for (const client of providers) {
+    if (client.isAvailable && !client.isAvailable()) {
+      meta.fallbacks.push({ step: "classify", provider: client.name, reason: "circuit open" });
+      continue;
+    }
     const started = Date.now();
     try {
-      const plan = await classifyQuery(nearAi, query);
+      const plan = await classifyQuery(client, query);
       language = plan.language;
-      // A supported regex match is never downgraded to "unsupported" by the model.
+      // A supported regex match is never downgraded to "unsupported" by a model.
       if (plan.intent === "unsupported" && regexIntent !== "unsupported") {
         intent = regexIntent;
       } else {
         intent = plan.intent;
         aiCity = plan.city;
       }
-      meta.classifier = "nearai";
-      meta.classify_ms = Date.now() - started;
+      meta.classifier = client.name;
+      meta.classify_model = client.model;
+      break;
     } catch (error) {
-      meta.classify_fallback = error?.name === "NearAiError" ? error.message : "error";
-      meta.classify_ms = Date.now() - started;
-      // Service unreachable / HTTP error: do not wait a second time for the writer.
-      if (/^NEAR AI (request failed|returned HTTP)/u.test(meta.classify_fallback)) aiAvailable = false;
+      if (error?.kind === "unreachable") unreachable.add(client);
+      meta.fallbacks.push({ step: "classify", provider: client.name, reason: reasonOf(error), ms: Date.now() - started });
     }
   }
+  if (providers.length) meta.classify_ms = Date.now() - classifyStarted;
   meta.intent = intent;
 
   try {
@@ -163,16 +176,25 @@ export async function buildReport(query, { fetchJson, nearAi = null, log = () =>
         : await issData(fetchJson, resolveLocation(aiCity, query), now ?? Date.now());
 
     let aiText = null;
-    if (aiAvailable) {
+    const writeStarted = Date.now();
+    for (const client of providers) {
+      if (unreachable.has(client)) continue;
+      if (client.isAvailable && !client.isAvailable()) {
+        meta.fallbacks.push({ step: "write", provider: client.name, reason: "circuit open" });
+        continue;
+      }
       const started = Date.now();
       try {
-        aiText = await writeAiReport(nearAi, { query, language: language || "es", facts: data.facts });
-        meta.writer = "nearai";
+        aiText = await writeAiReport(client, { query, language: language || "es", facts: data.facts });
+        meta.writer = client.name;
+        meta.model = client.model;
+        break;
       } catch (error) {
-        meta.write_fallback = error?.name === "NearAiError" ? error.message : "error";
+        if (error?.kind === "unreachable") unreachable.add(client);
+        meta.fallbacks.push({ step: "write", provider: client.name, reason: reasonOf(error), ms: Date.now() - started });
       }
-      meta.write_ms = Date.now() - started;
     }
+    if (providers.length) meta.write_ms = Date.now() - writeStarted;
     return { report: composeReport(aiText, data.template), meta };
   } finally {
     log(meta);
