@@ -160,3 +160,31 @@ export function formatIssPassReport(city, pass, { defaulted = false } = {}) {
     `Prediction uses current CelesTrak orbital elements and is approximate.`
   );
 }
+
+/** Structured, verifiable facts for an ISS pass (used by the AI writer and tests). */
+export function issPassFacts(city, pass, { defaulted = false } = {}) {
+  const facts = {
+    topic: "iss_pass",
+    source: "CelesTrak ISS orbital elements (NORAD 25544), SGP4 computation by the agent",
+    location: `${city.name}, Chile`,
+    default_location_used: defaulted,
+    observer_latitude: city.latitude.toFixed(3),
+    observer_longitude: city.longitude.toFixed(3),
+    minimum_elevation_degrees: 10,
+    search_window_hours: 24,
+    pass: null,
+  };
+  if (pass) {
+    facts.pass = {
+      date_chile: chileDateFormatter.format(new Date(pass.rise)),
+      start_chile_time: chileTimeOnly.format(new Date(pass.rise)),
+      end_chile_time: chileTimeOnly.format(new Date(pass.set)),
+      chile_utc_offset: chileOffset(pass.rise),
+      start_utc: `${utcMinute(pass.rise)} UTC`,
+      end_utc: `${utcMinute(pass.set)} UTC`,
+      max_elevation_degrees: Math.round((pass.maxElevation * 180) / Math.PI),
+      note: "approximate prediction",
+    };
+  }
+  return facts;
+}

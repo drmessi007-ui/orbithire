@@ -34,8 +34,11 @@ AI agents that sell a service need a way to get paid that does not require the b
                                                                      and by scanning blocks / contract state
                                                                      • re-reads the tx on-chain: success, target
                                                                        contract, exact fee, query hash
-                                                                     • NOAA SWPC Kp index  or  ISS pass over
+                                                                     • NEAR AI Cloud LLM: intent (allow-list) ─┐
+                                                                     • NOAA SWPC Kp index  or  ISS pass over  │
                                                                        a Chilean city (CelesTrak + satellite.js)
+                                                                     • NEAR AI Cloud LLM: prose from facts ───┘
+                                                                       + deterministic "Verified data" footer
                                 orbit-hire.submit_report  ◄───────── • signs with the agent account
                                 • moves fee to orbit-treasury escrow
                                 orbit-hire.confirm_report_received ◄ • confirms the same report hash
@@ -55,7 +58,7 @@ AI agents that sell a service need a way to get paid that does not require the b
 
 ### Supported questions
 
-The agent matches simple keyword rules (Spanish or English); it is not a general chatbot.
+The agent understands the question with NEAR AI Cloud (any language), falling back to simple keyword rules (Spanish or English). It is not a general chatbot: it only answers the two topics below, always from real data.
 
 | Ask something like | Data source | Result |
 | --- | --- | --- |
@@ -63,7 +66,18 @@ The agent matches simple keyword rules (Spanish or English); it is not a general
 | "¿A qué hora pasa la ISS sobre Santiago?" / "ISS over Punta Arenas" / "ISS pass" | CelesTrak GP elements for NORAD 25544 + city table in `agent/src/iss-location.js` | Next pass window over that city in Chile time (America/Santiago) and UTC, max elevation (Osorno when no city is named) |
 | "ISS sobre Puerto Varas" (city not in the list) | — | Fails with `No reconozco la ciudad "puerto varas"…` and the list of supported cities; refundable after 24 h |
 
-Anything else (for example "size of the moon") fails with `Query does not match a supported NOAA or ISS request`. The fee then stays in escrow and can be refunded after 24 h. The 1-hour rate limit still applies, because it starts when you pay.
+Anything else (for example "size of the moon") fails with a clear message listing the two supported kinds of question. The fee then stays in escrow and can be refunded after 24 h. The 1-hour rate limit still applies, because it starts when you pay.
+
+## AI: NEAR AI Cloud
+
+The agent uses [NEAR AI Cloud](https://cloud.near.ai) (OpenAI-compatible `POST /v1/chat/completions` at `https://cloud-api.near.ai/v1`) for two narrow jobs. Code: `agent/src/nearai.js` and `agent/src/report-pipeline.js`.
+
+1. **Understand the question.** The model receives the on-chain query as delimited, untrusted data and must return only `{"intent": "iss_pass" | "space_weather" | "unsupported", "city": string|null, "language": "es"|"en"|…}`. The JSON is validated strictly (no extra fields, intent in the allow-list, city letters only). The city is accepted only if it maps to the fixed table in `iss-location.js`; an unknown city gives the "unsupported city" failure. A keyword match is never downgraded to `unsupported` by the model.
+2. **Write the briefing.** The agent computes the facts itself (NOAA Kp, or the ISS pass with SGP4) and passes them as JSON. The model writes a short briefing in the user's language using only those facts. A post-check rejects empty or long output, links and markup, and **any number that is not in the facts**. Every report ends with a deterministic `Verified data:` footer containing the raw values (Chile time and UTC, elevation, Kp, source), so the numbers are verifiable whatever the LLM wrote.
+
+**Fallback:** with no key, no credits, a timeout (`NEARAI_TIMEOUT_MS`, default 20 s) or invalid output, the agent uses the keyword classifier and the template report, so a paid request never fails because of the LLM. The model never sees secrets and never influences payment, signer, `request_id`, report hash or chain calls. Logs contain only metadata (intent, model, latency, fallback reason), never prompts or the key.
+
+Config (server environment only): `NEARAI_API_KEY`, `NEARAI_BASE_URL`, `NEARAI_MODEL` (default `Qwen/Qwen3-VL-30B-A3B-Instruct`, served from NEAR AI's TEE infrastructure), `NEARAI_TIMEOUT_MS`, `NEARAI_MAX_TOKENS`.
 
 ## Try it (do X → see Y)
 
@@ -96,7 +110,7 @@ cargo build --release --target wasm32-unknown-unknown
 # Agent: unit tests (chain-event verification, block scanner, retry policy)
 cd agent
 npm ci
-npm test        # → 24 tests, 0 failures
+npm test        # → 33 tests, 0 failures (LLM calls are mocked)
 npm run check   # → syntax check of the agent sources
 ```
 
@@ -158,6 +172,7 @@ The deployed testnet Wasm is byte-identical (same SHA-256) to a release build of
 - **Escrow, not trust:** the fee only moves to the agent after a report hash is on-chain. Unsettled requests are refundable after 24 h.
 - **Rate limit:** one `request_service` per account per hour (owner-configurable). It also counts failed requests, because it starts at payment time.
 - **The query is public.** NEAR transaction arguments are public; only the hash is kept in state. Do not submit sensitive data. This is not a full commit-reveal scheme.
+- **LLM (NEAR AI Cloud) is sandboxed:** the query is untrusted data, the model output is limited to an allow-listed intent and fact-checked prose, and it never touches payments or signing. See `docs/SECURITY.md`.
 - **Prompt-injection guard (Jev / TypeSafe)** is implemented as a hook in the agent (`JEV_API_KEY`). **On the live demo it currently runs in simulation mode**, so it is not an active security control. The contract cannot attest that a guard ran.
 - **Single owner key:** the owner can pause and change the rate limit. Multisig/DAO ownership is future work.
 - **No refund button in the UI yet:** refunds work via `claim_refund` from the requester's wallet or CLI.
@@ -168,11 +183,11 @@ More detail: [`docs/SECURITY.md`](docs/SECURITY.md).
 ## Libraries, templates and AI disclosure
 
 - **Contracts:** `near-sdk` 5.30.1 (features `legacy`, `unit-testing` for tests), `borsh` 1.8.1, `serde_json` 1.
-- **Agent:** `near-api-js` 7.2.0, `satellite.js` 7.2.0, `@typesafe-ai/sdk` 0.6.0 (Jev guard), `dotenv` 18.0.10. Node.js built-ins (`node:http`, `node:test`).
+- **Agent:** `near-api-js` 7.2.0, `satellite.js` 7.2.0, `@typesafe-ai/sdk` 0.6.0 (Jev guard), `dotenv` 18.0.10. NEAR AI Cloud via plain `fetch` (no SDK). Node.js built-ins (`node:http`, `node:test`).
 - **Frontend:** `@near-wallet-selector/core` and `@near-wallet-selector/meteor-wallet` 10.1.4 (loaded from jsDelivr). No framework, no build step.
 - **Data:** NOAA SWPC public JSON and CelesTrak GP elements (no API keys).
 - **Templates:** none beyond standard `near-sdk` contract structure.
-- **AI-written code:** most of the code and docs were written with AI coding assistants: GitHub Copilot in VS Code for the contracts, agent and frontend, and Grok Bot for the block-scanner/state-sweep fixes, live progress stages and this repository's packaging. The author reviewed, deployed and operates it.
+- **AI-written code:** most of the code and docs were written with AI coding assistants: GitHub Copilot in VS Code for the contracts, agent and frontend, and Grok Bot for the block-scanner/state-sweep fixes, live progress stages, the NEAR AI Cloud integration and this repository's packaging. At runtime the agent calls an LLM on NEAR AI Cloud to classify questions and word reports (see "AI: NEAR AI Cloud"). The author reviewed, deployed and operates it.
 
 ## License
 

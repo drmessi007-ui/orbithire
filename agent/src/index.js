@@ -6,7 +6,6 @@ import path from "node:path";
 import dotenv from "dotenv";
 import { choice, TypeSafeClient } from "@typesafe-ai/sdk";
 import { Account, JsonRpcProvider, teraToGas } from "near-api-js";
-import * as satellite from "satellite.js";
 import {
   extractNotifiedRequest,
   extractRequestCreated,
@@ -27,11 +26,9 @@ import {
   rateLimitRpc,
   scanHeights,
 } from "./block-scanner.js";
-import {
-  formatIssPassReport,
-  resolveIssLocation,
-  UnsupportedLocationError,
-} from "./iss-location.js";
+import { UnsupportedLocationError } from "./iss-location.js";
+import { createNearAiClient, loadNearAiConfig } from "./nearai.js";
+import { buildReport, UnsupportedQueryError } from "./report-pipeline.js";
 
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(sourceDir, "../..");
@@ -45,6 +42,13 @@ if (config.jevApiKey) {
 const provider = new JsonRpcProvider({ url: config.rpcUrl });
 const account = new Account(config.agentAccountId, provider, config.agentPrivateKey);
 const jev = config.jevApiKey ? new TypeSafeClient() : null;
+const nearAiConfig = loadNearAiConfig();
+const nearAi = createNearAiClient(nearAiConfig);
+console.log(
+  nearAi.enabled
+    ? `NEAR AI Cloud enabled (model ${nearAiConfig.model}, timeout ${nearAiConfig.timeoutMs}ms); deterministic fallback active.`
+    : "NEAR AI Cloud disabled (no NEARAI_API_KEY); using deterministic classifier and template reports.",
+);
 const requests = new Map();
 const processing = new Set();
 const processed = new Set();
@@ -167,7 +171,15 @@ async function rpc(method, params, url = config.rpcUrl) {
       signal: AbortSignal.timeout(15000),
     });
     if (!response.ok) {
-      const message = `NEAR RPC ${method} returned HTTP ${response.status}`;
+      // Some RPC providers (e.g. FastNEAR) answer handler errors such as UNKNOWN_BLOCK
+      // with HTTP 422 + JSON body; keep the error name so the scanner can skip the height.
+      let detail = "";
+      try {
+        const body = await response.json();
+        const name = body?.error?.cause?.name || body?.error?.name;
+        if (typeof name === "string" && /^[A-Z_]{1,60}$/u.test(name)) detail = ` (${name})`;
+      } catch {}
+      const message = `NEAR RPC ${method} returned HTTP ${response.status}${detail}`;
       if (response.status === 408 || response.status === 429 || response.status >= 500) {
         throw new TransientAgentError(message);
       }
@@ -642,77 +654,13 @@ async function fetchJson(url) {
   }
 }
 
-async function createGeomagneticReport() {
-  const data = await fetchJson(
-    "https://services.swpc.noaa.gov/json/planetary_k_index_1m.json",
-  );
-  if (!Array.isArray(data) || data.length === 0) {
-    throw new TransientAgentError("NOAA returned no planetary K-index observations");
-  }
-  const latest = data[data.length - 1];
-  const kp = Number(latest.kp_index);
-  if (!Number.isFinite(kp)) throw new TransientAgentError("NOAA returned an invalid Kp index");
-  const storm = kp >= 5 ? "A geomagnetic storm level is indicated." : "No storm-level Kp is indicated.";
-  return `NOAA planetary K-index: ${kp.toFixed(1)} at ${latest.time_tag}. ${storm}`;
-}
-
-async function createIssReport(query) {
-  const location = resolveIssLocation(query);
-  if (location.unknownPlace) throw new UnsupportedLocationError(location.unknownPlace);
-  const { city, defaulted } = location;
-  const elements = await fetchJson(
-    "https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=JSON",
-  );
-  if (!Array.isArray(elements) || elements.length === 0) {
-    throw new TransientAgentError("CelesTrak returned no ISS orbital elements");
-  }
-  let satrec;
-  try {
-    satrec = satellite.json2satrec(elements[0]);
-  } catch (error) {
-    throw new TransientAgentError("CelesTrak returned invalid ISS orbital elements", {
-      cause: error,
-    });
-  }
-  const observer = {
-    longitude: satellite.degreesToRadians(city.longitude),
-    latitude: satellite.degreesToRadians(city.latitude),
-    height: city.height,
-  };
-  const start = Date.now();
-  const end = start + 24 * 60 * 60 * 1000;
-  let visiblePass = null;
-  let activePass = null;
-  for (let time = start; time <= end; time += 30_000) {
-    const date = new Date(time);
-    const propagated = satellite.propagate(satrec, date);
-    if (!propagated?.position) continue;
-    const ecf = satellite.eciToEcf(propagated.position, satellite.gstime(date));
-    const elevation = satellite.ecfToLookAngles(observer, ecf).elevation;
-    if (elevation >= satellite.degreesToRadians(10)) {
-      if (!activePass) activePass = { rise: time, maxElevation: elevation };
-      activePass.maxElevation = Math.max(activePass.maxElevation, elevation);
-    } else if (activePass) {
-      visiblePass = { ...activePass, set: time };
-      break;
-    }
-  }
-  if (!visiblePass && activePass) visiblePass = { ...activePass, set: end };
-  return formatIssPassReport(city, visiblePass, { defaulted });
-}
-
 async function createReport(query) {
-  if (/geomagn[eé]t|tormenta solar|tormenta geomagn|space weather/iu.test(query)) {
-    return createGeomagneticReport();
-  }
-  if (
-    /iss|estaci[oó]n espacial(?: internacional)?|estacion espacial internacional|sobre osorno|international space station/iu.test(
-      query,
-    )
-  ) {
-    return createIssReport(query);
-  }
-  throw new Error("Query does not match a supported NOAA or ISS request");
+  const { report } = await buildReport(query, {
+    fetchJson,
+    nearAi,
+    log: (meta) => console.log(`Report pipeline: ${JSON.stringify(meta)}`),
+  });
+  return report;
 }
 
 async function callContract(methodName, args) {
@@ -949,7 +897,7 @@ async function processChainRequest(requestId) {
 
     const reason = isTransientError(error)
       ? `No se pudo completar la consulta después de ${MAX_REQUEST_ATTEMPTS} intentos.`
-      : error instanceof UnsupportedLocationError
+      : error instanceof UnsupportedLocationError || error instanceof UnsupportedQueryError
         ? error.userMessage
         : "No se pudo completar la consulta.";
     console.error(

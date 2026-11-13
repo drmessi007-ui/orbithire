@@ -22,6 +22,7 @@ Scope: OrbitHire testnet prototype, as deployed on 2026-11-13. Not audited.
 - Read-only public status API (`GET /api/requests/{uuid}` with a strict regex), CORS limited to `FRONTEND_ORIGIN`, `Cache-Control: no-store`.
 - Retry policy with at most 3 attempts and exponential backoff; transient data-source failures are reported as failed or pending, never as fabricated reports.
 - RPC rate limiting and backoff for the block scanner, plus a periodic contract-state sweep so requests are not missed.
+- **LLM prompt-injection handling (NEAR AI Cloud):** the query is public and attacker-controlled, so it is passed to the model only inside `<user_query>` delimiters with a system prompt that forbids following instructions in it. The model can only (a) return a strictly validated JSON intent from an allow-list (`iss_pass`, `space_weather`, `unsupported`; extra fields, other intents or non-letter city values are rejected) and (b) rewrite facts the agent computed. The city must resolve through the fixed city table. The prose is rejected if it is empty, longer than 1,200 characters, contains links or markup, or contains any number not present in the computed facts; then the template report is used. A deterministic `Verified data:` footer with the raw values is always appended. The model has no tools and never influences payment, signer, `request_id`, report hash or chain calls. Any LLM error, timeout or invalid output falls back to the keyword classifier and template report. Only metadata (intent, model, latency, fallback reason) is logged; the key lives only in the root-owned 0600 environment file. Unit tests cover valid JSON, invalid JSON, timeout, injection attempts and unknown cities (`agent/test/nearai.test.js`).
 - Secrets only in the server environment (systemd `EnvironmentFile` installed root-owned with mode 0600). The agent key is the agent account's own key, not the owner key.
 - Hardened systemd unit (`deploy/orbithire-agent.service`): dedicated unprivileged user, `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `UMask=0077`, write access only to the data directory. The deploy examples bind the API to loopback behind nginx or Caddy for HTTPS.
 
@@ -39,6 +40,8 @@ Scope: OrbitHire testnet prototype, as deployed on 2026-11-13. Not audited.
 - **Commit-reveal privacy:** not implemented. The plaintext query is visible in the public transaction arguments; only its hash is stored in state.
 
 ## Known limitations
+
+- The LLM wording can still be imperfect (for example, phrasing); the `Verified data:` footer is the authoritative content and is what the report hash commits to together with the prose.
 
 - Failed requests still consume the hourly rate limit, and the UI has no refund button yet (`claim_refund` must be called from the requester's wallet or CLI).
 - Agent state is a single-process JSONL store.
