@@ -1,0 +1,35 @@
+[Unit]
+Description=OrbitHire NEAR testnet off-chain agent
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=orbithire
+Group=orbithire
+WorkingDirectory=/opt/orbithire-agent/app
+Environment=NODE_ENV=production
+Environment=PATH=/opt/orbithire-runtime/node-v22.23.5/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/etc/orbithire-agent/agent.env
+ExecStart=/opt/orbithire-runtime/node-v22.23.5/bin/node /opt/orbithire-agent/app/src/index.js
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/opt/orbithire-agent/app/data
+
+[Install]
+WantedBy=multi-user.target

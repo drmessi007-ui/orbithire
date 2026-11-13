@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#08111f">
+    <meta
+      name="description"
+      content="OrbitHire conecta consultas espaciales con agentes en NEAR testnet."
+    >
+    <title>OrbitHire — consultas espaciales</title>
+    <link rel="stylesheet" href="./style.css">
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <a class="brand" href="./" aria-label="OrbitHire inicio">
+          <span class="brand-mark" aria-hidden="true">O</span>
+          <span>OrbitHire</span>
+        </a>
+        <div class="network-badges" aria-label="Estado del entorno">
+          <span class="badge badge-beta">BETA</span>
+          <span class="badge badge-network"><span class="pulse-dot"></span> NEAR TESTNET · NO MAINNET</span>
+        </div>
+        <button class="button button-quiet" id="wallet-button" type="button" disabled>Conectar Meteor Wallet</button>
+      </header>
+
+      <main>
+        <section class="hero">
+          <div class="hero-copy">
+            <p class="eyebrow"><span class="eyebrow-line"></span> AGENT ECONOMY · NEAR</p>
+            <h1>Pregúntale al<br><span class="gradient-text">universo.</span></h1>
+            <p class="hero-description">
+              Consultas espaciales, datos abiertos y agentes verificables.
+              Paga una tarifa fija y sigue el recibo en la blockchain.
+            </p>
+            <div class="hero-footnote">
+              <span class="orbit-icon" aria-hidden="true">↗</span>
+              <span>Una experiencia experimental en testnet. Sin valor real.</span>
+            </div>
+          </div>
+          <div class="orbit-art" aria-hidden="true">
+            <div class="orbit orbit-one"></div>
+            <div class="orbit orbit-two"></div>
+            <div class="planet"></div>
+            <div class="orbit-star star-one"></div>
+            <div class="orbit-star star-two"></div>
+            <div class="orbit-star star-three"></div>
+          </div>
+        </section>
+
+        <section class="workspace" aria-labelledby="request-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">01 — NUEVA CONSULTA</p>
+              <h2 id="request-title">¿Qué quieres saber?</h2>
+            </div>
+            <div class="fee-pill"><span>Tarifa fija</span><strong>0.1 NEAR</strong></div>
+          </div>
+
+          <div class="request-card">
+            <label class="field-label" for="query">Tu pregunta espacial</label>
+            <textarea
+              id="query"
+              maxlength="500"
+              rows="3"
+              placeholder="¿A qué hora pasa la ISS sobre Osorno?"
+              autocomplete="off"
+            ></textarea>
+            <div class="input-meta">
+              <span>Prueba NOAA o el paso de la ISS sobre Osorno.</span>
+              <span id="char-count">0 / 500</span>
+            </div>
+
+            <div class="privacy-note">
+              <span class="info-icon" aria-hidden="true">i</span>
+              <p>
+                Los argumentos de la transacción son públicos en NEAR. No incluyas
+                información sensible. Tras el pago, un agente hospedado observa la
+                cadena y procesa la solicitud.
+              </p>
+            </div>
+            <p class="button-caption" id="agent-api-note">
+              La API HTTPS del agente aún debe configurarse antes de habilitar pagos.
+            </p>
+
+            <button class="button button-primary" id="submit-button" type="button" disabled>
+              <span>Pagar y consultar</span>
+              <span aria-hidden="true">↗</span>
+            </button>
+            <p class="button-caption">Se solicitará tu aprobación en la wallet · 0.1 NEAR exactos</p>
+          </div>
+        </section>
+
+        <section class="response-section" aria-labelledby="response-title">
+          <div class="section-heading response-heading">
+            <div>
+              <p class="eyebrow">02 — RESULTADO</p>
+              <h2 id="response-title">Tu respuesta</h2>
+            </div>
+            <span class="status-label" id="status-label">A la espera de una consulta</span>
+          </div>
+          <div class="response-card" id="response-card" aria-live="polite">
+            <div class="empty-state" id="empty-state">
+              <span class="empty-orbit" aria-hidden="true">✳</span>
+              <p>La respuesta y el recibo aparecerán aquí.</p>
+              <span>Conecta tu wallet para comenzar.</span>
+            </div>
+            <div class="result-content" id="result-content" hidden>
+              <div class="result-progress" id="result-progress" hidden>
+                <ol class="progress-stages" id="progress-stages"></ol>
+                <p class="progress-live" id="progress-live" hidden>
+                  <span class="progress-spinner" aria-hidden="true"></span>
+                  <span id="progress-live-text">Cargando el resultado…</span>
+                </p>
+                <p class="progress-meta" id="progress-meta" hidden></p>
+              </div>
+              <p class="result-copy" id="result-copy"></p>
+              <dl class="transaction-details">
+                <div>
+                  <dt>Request ID</dt>
+                  <dd id="request-id"></dd>
+                </div>
+                <div>
+                  <dt>Transacción</dt>
+                  <dd><a id="transaction-link" href="#" target="_blank" rel="noopener noreferrer">Ver en NEAR Explorer ↗</a></dd>
+                </div>
+              </dl>
+            </div>
+          </div>
+        </section>
+
+        <section class="history-section" aria-labelledby="history-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">03 — ACTIVIDAD</p>
+              <h2 id="history-title">Historial de consultas</h2>
+            </div>
+            <span class="history-wallet" id="history-wallet">Conecta una wallet para ver su historial</span>
+          </div>
+          <div class="history-card" id="history-card" aria-live="polite">
+            <p class="history-storage-note" id="history-storage-note" hidden></p>
+            <p class="history-empty" id="history-empty">Las consultas de la wallet conectada aparecerán aquí.</p>
+            <ol class="history-list" id="history-list" hidden></ol>
+          </div>
+        </section>
+
+        <section class="contract-strip" aria-label="Contratos desplegados">
+          <div>
+            <span class="contract-dot"></span>
+            <span>OrbitHire</span>
+            <code>orbit-hire.shortemail369.testnet</code>
+          </div>
+          <div>
+            <span class="contract-dot treasury-dot"></span>
+            <span>OrbitTreasury</span>
+            <code>orbit-treasury.shortemail369.testnet</code>
+          </div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <span>OrbitHire <span aria-hidden="true">·</span> Prototipo de hackathon</span>
+        <a href="https://explorer.testnet.near.org" target="_blank" rel="noopener noreferrer">NEAR Testnet Explorer ↗</a>
+      </footer>
+    </div>
+  </body>
+</html>

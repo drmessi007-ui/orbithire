@@ -1,0 +1,30 @@
+# Build output
+/target/
+*.wasm
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/corpus/
+
+# Secrets and local config (never commit)
+.env
+.env.*
+!.env.example
+!**/.env.example
+/secrets/
+*.pem
+*.key
+.near-credentials/
+
+# Agent runtime state and dependencies
+agent/node_modules/
+node_modules/
+agent/data/
+agent/logs/
+data/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

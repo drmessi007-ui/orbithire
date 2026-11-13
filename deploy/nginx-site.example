@@ -1,0 +1,16 @@
+# Add this server block to the existing Nginx site configuration.
+# Replace the domain and upstream port; configure TLS using the host's
+# existing certificate process before exposing this site publicly.
+server {
+    listen 80;
+    server_name agent.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

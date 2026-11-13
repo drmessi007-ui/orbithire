@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+node_modules/
+data/
+logs/
+test/
+README.md
+ecosystem.config.cjs
+deploy.ps1
+docker-compose.yml
+Caddyfile
+Dockerfile

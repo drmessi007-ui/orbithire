@@ -1,0 +1,19 @@
+[package]
+name = "orbit-hire"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+borsh.workspace = true
+near-sdk = { workspace = true, features = ["legacy"] }
+orbit-common.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+near-sdk = { workspace = true, features = ["legacy", "unit-testing"] }
+orbit-treasury = { path = "../orbit-treasury" }

@@ -1,0 +1,5 @@
+# Merge this site block into the existing Caddy configuration.
+# Replace the domain and upstream port; do not start another listener on 80/443.
+agent.example.com {
+	reverse_proxy 127.0.0.1:8787
+}

@@ -1,0 +1,55 @@
+services:
+  agent:
+    image: orbithire-agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      SERVICE_HOST: 0.0.0.0
+      SERVICE_PORT: 8787
+    ports:
+      - "127.0.0.1:${HOST_PORT:-8787}:8787"
+    volumes:
+      - agent-data:/app/agent/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8787/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+
+  caddy:
+    image: caddy:2-alpine
+    profiles:
+      - https
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:-agent.example.com}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      agent:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  agent-data:
+  caddy-data:
+  caddy-config:
