@@ -29,6 +29,7 @@ import {
 import { UnsupportedLocationError } from "./iss-location.js";
 import { createLlmProviders } from "./llm.js";
 import { buildReport, UnsupportedQueryError } from "./report-pipeline.js";
+import { diskStore, withCache } from "./cached-fetch.js";
 
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(sourceDir, "../..");
@@ -633,29 +634,56 @@ async function classifyWithJev(state, label) {
   return answer;
 }
 
-async function fetchJson(url) {
+async function fetchRaw(url, { accept, range } = {}) {
   try {
-    const response = await fetch(url, {
-      headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(12000),
-    });
+    const headers = { accept, "user-agent": "OrbitHire-agent/0.2 (+https://github.com/drmessi007-ui/orbithire)" };
+    if (range) headers.range = range;
+    const response = await fetch(url, { headers, signal: AbortSignal.timeout(20000) });
     if (!response.ok) {
       const message = `${new URL(url).hostname} returned HTTP ${response.status}`;
       throw new TransientAgentError(message);
     }
-    return await response.json();
+    return response;
   } catch (error) {
     if (isTransientError(error)) throw error;
-    if (error instanceof TypeError || error instanceof SyntaxError) {
+    if (error instanceof TypeError) {
       throw new TransientAgentError(`${new URL(url).hostname} request failed`, { cause: error });
     }
     throw error;
   }
 }
 
+// Cached in memory and in data/cache (survives restarts): CelesTrak allows one
+// download of the same data every 2 hours and answers repeats with plain text.
+const publicDataStore = diskStore(path.join(dataDir, "cache"));
+const fetchJson = withCache(
+  async (url) => {
+    const response = await fetchRaw(url, { accept: "application/json" });
+    const text = await response.text();
+    if (/^GP data has not updated/u.test(text)) {
+      throw new TransientAgentError("CelesTrak data not updated since the last download (2-hour rule)");
+    }
+    try {
+      return JSON.parse(text);
+    } catch (error) {
+      throw new TransientAgentError(`${new URL(url).hostname} returned invalid JSON`, { cause: error });
+    }
+  },
+  { store: publicDataStore },
+);
+
+const fetchText = withCache(
+  async (url, { range } = {}) => {
+    const response = await fetchRaw(url, { accept: "text/csv, text/plain, */*", range });
+    return response.text();
+  },
+  { store: publicDataStore },
+);
+
 async function createReport(query) {
   const { report } = await buildReport(query, {
     fetchJson,
+    fetchText,
     llm: llmProviders,
     log: (meta) => console.log(`Report pipeline: ${JSON.stringify(meta)}`),
   });

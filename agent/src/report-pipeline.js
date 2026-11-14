@@ -10,6 +10,15 @@ import {
   UnsupportedLocationError,
 } from "./iss-location.js";
 import { classifyQuery, writeAiReport } from "./llm.js";
+import {
+  asteroidData,
+  auroraData,
+  conjunctionData,
+  launchData,
+  reentryData,
+  satellitePassData,
+  starlinkTrainData,
+} from "./space-data.js";
 
 export const MAX_REPORT_CHARS = 3000;
 export const NOAA_KP_URL = "https://services.swpc.noaa.gov/json/planetary_k_index_1m.json";
@@ -17,25 +26,91 @@ export const CELESTRAK_ISS_URL = "https://celestrak.org/NORAD/elements/gp.php?CA
 
 export class UnsupportedQueryError extends Error {
   constructor() {
-    super("Query does not match a supported NOAA or ISS request");
+    super("Query does not match a supported space-data request");
     this.name = "UnsupportedQueryError";
     this.userMessage =
-      "OrbitHire solo responde dos tipos de consulta: el paso de la ISS sobre una ciudad de Chile " +
-      "(por ejemplo: «¿A qué hora pasa la ISS sobre Santiago?») y el clima espacial / tormentas " +
-      "geomagnéticas de NOAA (por ejemplo: «¿Hay una tormenta geomagnética hoy?»).";
+      "OrbitHire responde: paso de la ISS («¿A qué hora pasa la ISS sobre Santiago?»), pasos de cualquier " +
+      "satélite por número NORAD o grupo («pasos visibles del Hubble sobre Osorno», «NORAD 48274», " +
+      "«satélites brillantes esta noche», «cuántos Starlink hay sobre mí»), tormentas geomagnéticas («¿Hay " +
+      "una tormenta geomagnética hoy?»), auroras y alertas Kp («pronóstico de auroras, alerta Kp 6»), " +
+      "reingresos («qué satélites van a caer»), asteroides cercanos, próximos lanzamientos, trenes de " +
+      "Starlink y riesgo de choque entre satélites (SOCRATES).";
   }
 }
 
+const VISIBLE_PASSES = /pasos visibles|a simple vista|pr[oó]ximos pasos|visible passes|next passes|naked eye/iu;
+
 export function regexClassify(query) {
+  if (/conjunci[oó]n|conjunciones|colisi[oó]n|choque|socrates|collision|conjunction/iu.test(query)) {
+    return "conjunctions";
+  }
+  if (/asteroide|asteroid|neos?|near.earth object|objetos? cercanos? a la tierra|roca espacial|cometa/iu.test(query)) {
+    return "asteroids";
+  }
+  if (/starlink/iu.test(query) && /tren|train|fila|l[ií]nea|row|reci[eé]n|recent|luces|lights|lanzad/iu.test(query)) {
+    return "starlink_train";
+  }
+  if (/lanzamiento|launch|cohete|rocket|despegue/iu.test(query)) {
+    return "launches";
+  }
+  if (/reingres|re-?entr|reentry|caer[aá]n?\b|va(?:n)? a caer|ca[ií]da de sat|decay|basura espacial|space debris/iu.test(query)) {
+    return "reentry";
+  }
+  if (
+    /aurora|ovation|luces del (?:sur|norte)|southern lights|northern lights|alerta kp|kp alert|umbral|threshold|pron[oó]stico (?:de(?:l)? )?kp|kp forecast|kp\s*(?:>=|≥|>)/iu.test(
+      query,
+    )
+  ) {
+    return "aurora";
+  }
   if (/geomagn[eé]t|tormenta solar|tormenta geomagn|space weather|clima espacial|[ií]ndice kp|\bkp\b/iu.test(query)) {
     return "space_weather";
   }
+  const namesIss = /\biss\b|estaci[oó]n espacial internacional|international space station/iu.test(query);
+  if (!namesIss && /hubble|\bhst\b|tiangong|estaci[oó]n (?:espacial )?china|chinese space station|norad|catnr|starlink|sat[eé]lite|satellite/iu.test(query)) {
+    return "satellite_pass";
+  }
   if (
-    /\biss\b|estaci[oó]n espacial(?: internacional)?|sobre osorno|international space station|space station/iu.test(query)
+    /\biss\b|estaci[oó]n espacial(?: internacional)?|sobre osorno|international space station|space station/iu.test(query) &&
+    !/tiangong|china|chinese/iu.test(query)
   ) {
-    return "iss_pass";
+    return VISIBLE_PASSES.test(query) ? "satellite_pass" : "iss_pass";
+  }
+  if (
+    /sat[eé]lite|satellite|norad|catnr|hubble|\bhst\b|tiangong|estaci[oó]n (?:espacial )?china|starlink|\bgps\b|meteorol[oó]gic|simple vista|naked eye/iu.test(
+      query,
+    )
+  ) {
+    return "satellite_pass";
   }
   return "unsupported";
+}
+
+/** Fetch real data for an intent. Each intent is one hireable request type. */
+export async function dataForIntent(intent, { query, aiCity, fetchJson, fetchText, now }) {
+  switch (intent) {
+    case "space_weather":
+      return geomagneticData(fetchJson);
+    case "iss_pass":
+      return issData(fetchJson, resolveLocation(aiCity, query), now);
+    case "satellite_pass":
+      return satellitePassData(fetchJson, { query, aiCity, now });
+    case "aurora":
+      return auroraData(fetchJson, { query, aiCity, now });
+    case "reentry":
+      return reentryData(fetchJson, { now });
+    case "asteroids":
+      return asteroidData(fetchJson, { now });
+    case "launches":
+      return launchData(fetchJson, { now });
+    case "starlink_train":
+      return starlinkTrainData(fetchJson, { query, aiCity, now });
+    case "conjunctions":
+      if (!fetchText) throw new TransientAgentError("text fetcher not configured");
+      return conjunctionData(fetchText);
+    default:
+      throw new UnsupportedQueryError();
+  }
 }
 
 /** Resolve the ISS observer: AI-proposed city is only accepted through the fixed city table. */
@@ -130,7 +205,7 @@ function reasonOf(error) {
  * the final fallback. Returns { report, meta }; meta is safe to log (no query text,
  * no prompts, no secrets).
  */
-export async function buildReport(query, { fetchJson, llm, nearAi = null, log = () => {}, now } = {}) {
+export async function buildReport(query, { fetchJson, fetchText = null, llm, nearAi = null, log = () => {}, now } = {}) {
   const providers = (llm ?? (nearAi ? [nearAi] : [])).filter((client) => client?.enabled);
   const meta = { intent: null, classifier: "regex", writer: "template", model: null, fallbacks: [] };
   const regexIntent = regexClassify(query);
@@ -170,10 +245,7 @@ export async function buildReport(query, { fetchJson, llm, nearAi = null, log = 
 
   try {
     if (intent === "unsupported") throw new UnsupportedQueryError();
-    const data =
-      intent === "space_weather"
-        ? await geomagneticData(fetchJson)
-        : await issData(fetchJson, resolveLocation(aiCity, query), now ?? Date.now());
+    const data = await dataForIntent(intent, { query, aiCity, fetchJson, fetchText, now: now ?? Date.now() });
 
     let aiText = null;
     const writeStarted = Date.now();
