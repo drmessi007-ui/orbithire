@@ -8,7 +8,9 @@
 //   conjunctions    CelesTrak SOCRATES Plus top conjunctions
 // Every number in a report comes from these sources or from deterministic math in the agent.
 import { TransientAgentError } from "./retry-policy.js";
-import { CHILE_TIME_ZONE, formatChileTime, resolveIssLocation, UnsupportedLocationError } from "./iss-location.js";
+import * as satellite from "satellite.js";
+import { CHILE_TIME_ZONE, formatChileTime } from "./iss-location.js";
+import { parseCoordinates, parseRelativeTime, pointInPolygon, resolvePlace } from "./when-where.js";
 import {
   altitudesKm,
   compass,
@@ -49,34 +51,15 @@ export function utcShort(ms) {
 const round = (x, d = 0) => Number(Number(x).toFixed(d));
 
 // ---------------------------------------------------------------- observer
-const COORDINATES = /(-?\d{1,2}(?:\.\d+))\s*[,;]?\s*(-?\d{1,3}(?:\.\d+))/u;
+export { parseCoordinates };
 
-/** Explicit "lat, lon" decimal coordinates in the query (both need a decimal point). */
-export function parseCoordinates(query) {
-  const match = COORDINATES.exec(String(query));
-  if (!match) return null;
-  const latitude = Number(match[1]);
-  const longitude = Number(match[2]);
-  if (Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return null;
-  return { name: `${latitude.toFixed(3)}, ${longitude.toFixed(3)}`, latitude, longitude, height: 0 };
+/** Observer for location-based services. Never throws: unknown places fall back to Osorno with a note. */
+export function resolveObserver(aiCity, query) {
+  return resolvePlace(aiCity, query);
 }
 
-/** Observer for location-based services: explicit coordinates, else the Chilean city table (Osorno default). */
-export function resolveObserver(aiCity, query) {
-  const coords = parseCoordinates(query);
-  if (coords) return { location: coords, defaulted: false };
-  let result = null;
-  if (aiCity) {
-    const fromAi = resolveIssLocation(aiCity);
-    if (fromAi.city && !fromAi.defaulted) result = fromAi;
-  }
-  if (!result) {
-    const fromQuery = resolveIssLocation(query);
-    if (fromQuery.city && !fromQuery.defaulted) result = fromQuery;
-    else result = aiCity ? { unknownPlace: aiCity } : fromQuery;
-  }
-  if (result.unknownPlace) throw new UnsupportedLocationError(result.unknownPlace);
-  return { location: { ...result.city, name: `${result.city.name}, Chile` }, defaulted: Boolean(result.defaulted) };
+function whereText(place) {
+  return `${place.location.name}${place.note ? ` (${place.note})` : place.defaulted ? " (default location)" : ""}`;
 }
 
 // ---------------------------------------------------------------- satellite targets
@@ -145,20 +128,177 @@ function passLine(p) {
   return `${p.object}: ${p.rise_chile}-${p.set_chile.slice(-5)} Chile time (${p.rise_utc}), max ${p.max_elevation_degrees} deg ${p.peak_direction}, ${p.rise_direction}->${p.set_direction}, ${vis}`;
 }
 
-export async function satellitePassData(fetchJson, { query, aiCity = null, now = Date.now() }) {
-  const { location, defaulted } = resolveObserver(aiCity, query);
+// Groups that are too big for JSON in memory: fetched as compact TLE text and
+// propagated one satellite at a time (bounded memory on the 1 GB agent server).
+export const TLE_GROUPS = new Set(["active", "starlink"]);
+
+/** Iterate TLE text without building an array of objects: yields { name, norad, satrec }. */
+export function* iterateTle(text) {
+  const lines = String(text).split(/\r?\n/u);
+  for (let i = 0; i + 2 < lines.length + 1; i++) {
+    const l1 = lines[i + 1];
+    const l2 = lines[i + 2];
+    if (!l1?.startsWith("1 ") || !l2?.startsWith("2 ")) continue;
+    const name = lines[i].trim();
+    i += 2;
+    let satrec;
+    try {
+      satrec = satellite.twoline2satrec(l1, l2);
+    } catch {
+      continue;
+    }
+    if (!satrec || satrec.error) continue;
+    yield { name, norad: Number(l1.slice(2, 7)), satrec, perigeeKm: satrec.altp * 6378.137 };
+  }
+}
+
+async function loadGroup(fetchJson, fetchText, group) {
+  if (TLE_GROUPS.has(group) && fetchText) {
+    const text = await fetchText(`${CELESTRAK_GP}?GROUP=${group}&FORMAT=TLE`);
+    if (!/^1 /mu.test(String(text))) throw new TransientAgentError(`CelesTrak returned no TLE data for group ${group}`);
+    return { tle: text };
+  }
+  const data = ommArray(await fetchJson(`${CELESTRAK_GP}?GROUP=${group}&FORMAT=JSON`), `group ${group}`);
+  const sats = [];
+  for (const omm of data) {
+    try {
+      sats.push({ name: String(omm.OBJECT_NAME), norad: Number(omm.NORAD_CAT_ID), satrec: satrecFromOmm(omm), perigeeKm: altitudesKm(omm).perigee });
+    } catch {}
+  }
+  return { sats };
+}
+
+function* eachSat(loaded) {
+  if (loaded.tle) yield* iterateTle(loaded.tle);
+  else yield* loaded.sats;
+}
+
+const FAMILIES = [
+  ["Starlink", /^STARLINK/u],
+  ["OneWeb", /^ONEWEB/u],
+  ["Amazon Kuiper/Leo", /^(KUIPER|AMAZON|PROJECT KUIPER)/u],
+  ["Chinese megaconstellations (Qianfan/Guowang)", /^(QIANFAN|GUOWANG|HULIANWANG|SATNET)/u],
+  ["Iridium", /^IRIDIUM/u],
+  ["Planet / Earth imaging", /^(FLOCK|SKYSAT|PELICAN|DOVE|WORLDVIEW|SENTINEL|LANDSAT|ICEYE|CAPELLA|UMBRA)/u],
+  ["Navigation (GPS/Galileo/GLONASS/BeiDou)", /^(GPS|NAVSTAR|GSAT0|GALILEO|COSMOS 2[45]\d\d \(GLONASS|GLONASS|BEIDOU)/u],
+  ["Weather (NOAA/METOP/GOES/Fengyun)", /^(NOAA|METOP|GOES|FENGYUN|FY-|HIMAWARI|METEOSAT|JPSS)/u],
+];
+function family(name) {
+  for (const [label, re] of FAMILIES) if (re.test(name)) return label;
+  return "Other";
+}
+const NOTABLE = new Map([
+  [25544, "ISS"],
+  [48274, "Tiangong (CSS)"],
+  [20580, "Hubble"],
+]);
+
+/** Satellites whose sub-satellite point is inside a region polygon at one instant. */
+export function regionSnapshot(loaded, region, at) {
+  const date = new Date(at);
+  const gmst = satellite.gstime(date);
+  const counts = new Map();
+  const notable = new Map();
+  const others = [];
+  let total = 0;
+  let inside = 0;
+  for (const s of eachSat(loaded)) {
+    total++;
+    const pv = satellite.propagate(s.satrec, date);
+    if (!pv?.position || typeof pv.position === "boolean") continue;
+    const gd = satellite.eciToGeodetic(pv.position, gmst);
+    const lat = toDegrees(gd.latitude);
+    const lon = toDegrees(gd.longitude);
+    const isInside = pointInPolygon(lon, lat, region.polygon);
+    if (NOTABLE.has(s.norad)) {
+      notable.set(s.norad, { object: NOTABLE.get(s.norad), over_region: isInside, subpoint: `${lat.toFixed(1)}, ${lon.toFixed(1)}`, altitude_km: round(gd.height) });
+    }
+    if (!isInside) continue;
+    inside++;
+    const fam = family(s.name);
+    counts.set(fam, (counts.get(fam) || 0) + 1);
+    if (fam === "Other" && others.length < 8) others.push({ object: `${s.name} (NORAD ${s.norad})`, subpoint: `${lat.toFixed(1)}, ${lon.toFixed(1)}`, altitude_km: round(gd.height) });
+  }
+  return {
+    total,
+    inside,
+    byFamily: [...counts.entries()].sort((x, y) => y[1] - x[1]).map(([group, count]) => ({ group, count })),
+    notable: [...NOTABLE.keys()].map((k) => notable.get(k) || { object: NOTABLE.get(k), over_region: false, subpoint: null, note: "not in the downloaded group" }),
+    others,
+  };
+}
+
+async function notableFromStations(fetchJson, region, at, snap) {
+  // Tiangong and Hubble may be missing from "active" filters; fill them from the small "stations"/CATNR queries.
+  for (const item of snap.notable) {
+    if (item.subpoint !== null) continue;
+    const norad = [...NOTABLE.entries()].find(([, name]) => name === item.object)?.[0];
+    try {
+      const omm = ommArray(await fetchJson(`${CELESTRAK_GP}?CATNR=${norad}&FORMAT=JSON`), `NORAD ${norad}`)[0];
+      const one = regionSnapshot({ sats: [{ name: omm.OBJECT_NAME, norad, satrec: satrecFromOmm(omm) }] }, region, at);
+      Object.assign(item, one.notable.find((n) => n.object === item.object), { note: undefined });
+    } catch {}
+  }
+}
+
+export async function satellitePassData(fetchJson, { query, aiCity = null, now = Date.now(), fetchText = null, forceTarget = null }) {
+  const place = resolveObserver(aiCity, query);
+  const { location, defaulted } = place;
   const observer = observerGd(location);
-  const target = parseSatelliteTarget(query);
-  const where = `${location.name}${defaulted ? " (default location)" : ""}`;
+  const target = forceTarget || parseSatelliteTarget(query);
+  const when = parseRelativeTime(query, now);
+  const at = when ? when.at : now;
+  const whenText = when
+    ? ` at ${chileShort(at)} Chile time (${utcShort(at)}; "${when.label}"${when.clamped ? ", limited to 7 days" : ""})`
+    : "";
+  const where = whereText(place);
   const baseFacts = {
     topic: "satellite_pass",
     source: "CelesTrak GP orbital elements, SGP4 computed by the agent; visibility = satellite sunlit while the Sun is below -6 deg at the observer",
     location: location.name,
     default_location_used: defaulted,
+    location_note: place.note,
     observer_latitude: location.latitude.toFixed(3),
     observer_longitude: location.longitude.toFixed(3),
     minimum_elevation_degrees: MIN_ELEVATION_DEG,
+    requested_time_chile: when ? chileShort(at) : null,
+    requested_time_utc: when ? utcShort(at) : null,
   };
+  const accuracy = when && Math.abs(at - now) > 3 * 86400_000 ? " Times more than 3 days away use current elements and may be off by minutes." : "";
+
+  // Region question ("qué satélites había sobre Chile hace 2 horas"): sub-satellite points inside the region.
+  if (place.region && target.kind === "group") {
+    const group = target.defaulted ? "active" : target.group;
+    const label = target.defaulted ? "All active satellites" : target.label;
+    const loaded = await loadGroup(fetchJson, fetchText, group);
+    const snap = regionSnapshot(loaded, place.region, at);
+    if (group === "active") await notableFromStations(fetchJson, place.region, at, snap);
+    const facts = {
+      topic: "satellites_over_region",
+      source: `CelesTrak GP (${group}), SGP4 computed by the agent; "over" = sub-satellite point inside the ${place.region.shape} of ${place.region.name}`,
+      region: place.region.name,
+      region_shape: place.region.shape,
+      time_chile: chileShort(at),
+      time_utc: utcShort(at),
+      time_expression: when ? when.label : "now",
+      satellites_checked: snap.total,
+      satellites_over_region: snap.inside,
+      by_group: snap.byFamily,
+      notable: snap.notable,
+      other_examples: snap.others,
+    };
+    const notableText = snap.notable
+      .map((n) => (n.subpoint === null ? `${n.object}: no data` : `${n.object}: ${n.over_region ? "OVER" : "not over"} ${place.region.name} (subpoint ${n.subpoint})`))
+      .join("; ");
+    const template =
+      `${label} over ${place.region.name} at ${chileShort(at)} Chile time (${utcShort(at)}${when ? `; "${when.label}"` : ""}${when?.clamped ? ", limited to 7 days" : ""}): ` +
+      `${snap.inside} of ${snap.total} satellites had their ground point inside ${place.region.name} (${place.region.shape}). ` +
+      `By group: ${snap.byFamily.map((f) => `${f.group} ${f.count}`).join(", ") || "none"}. ` +
+      `Notable: ${notableText}. ` +
+      (snap.others.length ? `Other examples: ${snap.others.map((o) => `${o.object} at ${o.altitude_km} km`).join("; ")}. ` : "") +
+      `SGP4 with current CelesTrak elements, approximate.${accuracy}`;
+    return { template, facts };
+  }
 
   if (target.kind === "norad") {
     const omm = ommArray(await fetchJson(`${CELESTRAK_GP}?CATNR=${target.norad}&FORMAT=JSON`), `NORAD ${target.norad}`)[0];
@@ -169,18 +309,18 @@ export async function satellitePassData(fetchJson, { query, aiCity = null, now =
     } catch (error) {
       throw new TransientAgentError(`CelesTrak returned invalid elements for NORAD ${target.norad}`, { cause: error });
     }
-    const grid = timeGrid(observer, now, 72, 30);
+    const alt = altitudesKm(omm);
+    const lowOrbit = alt.perigee < NAKED_EYE_MAX_PERIGEE_KM;
+    const grid = timeGrid(observer, at, 72, 30);
     const passes = findPasses(satrec, observer, grid, { maxPasses: 40 });
-    const nextPasses = passes.slice(0, 3).map((p) => passFacts(p, name, { lowOrbit: altitudesKm(omm).perigee < NAKED_EYE_MAX_PERIGEE_KM }));
+    const nextPasses = passes.slice(0, 3).map((p) => passFacts(p, name, { lowOrbit }));
     let visibleRaw = passes.filter((p) => p.visible);
     let visibleWindowHours = 72;
     if (visibleRaw.length < 3 && !(passes.length === 1 && passes[0].startsAtWindow)) {
       // Visible passes cluster in a few days of each month: look up to 7 days ahead.
       visibleWindowHours = 168;
-      visibleRaw = findPasses(satrec, observer, timeGrid(observer, now, 168, 30), { maxPasses: 120 }).filter((p) => p.visible);
+      visibleRaw = findPasses(satrec, observer, timeGrid(observer, at, 168, 30), { maxPasses: 120 }).filter((p) => p.visible);
     }
-    const alt = altitudesKm(omm);
-    const lowOrbit = alt.perigee < NAKED_EYE_MAX_PERIGEE_KM;
     if (!lowOrbit) visibleRaw = [];
     const visible = visibleRaw.slice(0, 3).map((p) => passFacts(p, name));
     const facts = {
@@ -194,40 +334,57 @@ export async function satellitePassData(fetchJson, { query, aiCity = null, now =
       next_passes: nextPasses,
       next_visible_passes: visible,
     };
-    if (passes.length === 1 && passes[0].startsAtWindow && passes[0].endsAfterWindow) {
-      facts.always_above_horizon = true;
+    if (passes.length === 1 && passes[0].startsAtWindow && passes[0].endsAfterWindow) facts.always_above_horizon = true;
+    let regionText = "";
+    if (place.region) {
+      const sub = (() => {
+        const date = new Date(at);
+        const pv = satellite.propagate(satrec, date);
+        if (!pv?.position || typeof pv.position === "boolean") return null;
+        const gd = satellite.eciToGeodetic(pv.position, satellite.gstime(date));
+        return { lat: toDegrees(gd.latitude), lon: toDegrees(gd.longitude) };
+      })();
+      const over = sub ? pointInPolygon(sub.lon, sub.lat, place.region.polygon) : false;
+      facts.over_region_at_time = over;
+      facts.subpoint_at_time = sub ? `${sub.lat.toFixed(1)}, ${sub.lon.toFixed(1)}` : null;
+      regionText = `At ${chileShort(at)} Chile time it was ${over ? "OVER" : "not over"} ${place.region.name} (ground point ${facts.subpoint_at_time}). `;
     }
-    let template = `${name} over ${where} (next 72 h, min elevation ${MIN_ELEVATION_DEG} deg). `;
+    const passWindow = when ? `72 h from ${chileShort(at)} Chile time` : "next 72 h";
+    let template = `${name} over ${where} (${passWindow}, min elevation ${MIN_ELEVATION_DEG} deg). ${regionText}`;
     if (facts.always_above_horizon) {
       template += `The object stays above the horizon the whole window (geostationary/high orbit), max ${nextPasses[0].max_elevation_degrees} deg.`;
     } else if (!passes.length) {
-      template += "No pass above 10 degrees in the next 72 hours.";
+      template += "No pass above 10 degrees in the window.";
     } else {
-      template += `Naked-eye visible passes (next ${visibleWindowHours / 24} days): ${visible.length ? visible.map(passLine).join(" | ") : "none"}. `;
-      template += `All next passes: ${nextPasses.map(passLine).join(" | ")}.`;
+      template += `Naked-eye visible passes (${visibleWindowHours / 24} days): ${visible.length ? visible.map(passLine).join(" | ") : "none"}. `;
+      template += `Passes: ${nextPasses.map(passLine).join(" | ")}.`;
     }
-    template += ` Orbit ${facts.perigee_km}-${facts.apogee_km} km. Elements epoch ${omm.EPOCH} UTC. Approximate SGP4 prediction.`;
+    template += ` Orbit ${facts.perigee_km}-${facts.apogee_km} km. Elements epoch ${omm.EPOCH} UTC. Approximate SGP4 prediction.${accuracy}`;
     return { template, facts };
   }
 
-  const data = ommArray(await fetchJson(`${CELESTRAK_GP}?GROUP=${target.group}&FORMAT=JSON`), `group ${target.group}`);
-  const sats = [];
-  for (const omm of data) {
-    try {
-      sats.push({ omm, satrec: satrecFromOmm(omm) });
-    } catch {}
-  }
-  if (sats.length > MAX_GROUP_FOR_PASSES) {
-    const [sample] = timeGrid(observer, now, 0, 60);
-    const above = [];
-    for (const s of sats) {
+  const loaded = await loadGroup(fetchJson, fetchText, target.group);
+  if (loaded.tle || loaded.sats.length > MAX_GROUP_FOR_PASSES) {
+    const [sample] = timeGrid(observer, at, 0, 60);
+    let total = 0;
+    let aboveCount = 0;
+    let sunlitAbove = 0;
+    const top = [];
+    for (const s of eachSat(loaded)) {
+      total++;
       const look = lookNow(s.satrec, observer, sample);
-      if (look && look.elevation > 0) above.push({ s, look });
+      if (!look || look.elevation <= 0) continue;
+      aboveCount++;
+      if (look.sunlit) sunlitAbove++;
+      top.push({ s, look });
+      if (top.length > 20) {
+        top.sort((a, b) => b.look.elevation - a.look.elevation);
+        top.length = 5;
+      }
     }
-    above.sort((a, b) => b.look.elevation - a.look.elevation);
-    const sunlitAbove = above.filter((a) => a.look.sunlit).length;
-    const top = above.slice(0, 5).map(({ s, look }) => ({
-      object: `${s.omm.OBJECT_NAME} (NORAD ${s.omm.NORAD_CAT_ID})`,
+    top.sort((a, b) => b.look.elevation - a.look.elevation);
+    const highest = top.slice(0, 5).map(({ s, look }) => ({
+      object: `${s.name} (NORAD ${s.norad})`,
       elevation_degrees: round(toDegrees(look.elevation)),
       direction: compass(look.azimuth),
       range_km: round(look.rangeSat),
@@ -235,26 +392,27 @@ export async function satellitePassData(fetchJson, { query, aiCity = null, now =
     const facts = {
       ...baseFacts,
       group: target.label,
-      objects_in_group: sats.length,
-      snapshot_chile: chileShort(now),
-      snapshot_utc: utcShort(now),
-      above_horizon_now: above.length,
-      above_horizon_sunlit_now: sunlitAbove,
+      objects_in_group: total,
+      snapshot_chile: chileShort(at),
+      snapshot_utc: utcShort(at),
+      above_horizon: aboveCount,
+      above_horizon_sunlit: sunlitAbove,
       observer_in_darkness: sample.dark,
-      highest_now: top,
+      highest: highest,
     };
     const template =
-      `${target.label} (${sats.length} objects, CelesTrak) above ${where} right now (${facts.snapshot_chile} Chile time, ${facts.snapshot_utc}): ` +
-      `${above.length} above the horizon, ${sunlitAbove} of them sunlit; observer ${sample.dark ? "in darkness" : "in daylight/twilight"}. ` +
-      `Highest: ${top.map((t) => `${t.object} ${t.elevation_degrees} deg ${t.direction}, ${t.range_km} km`).join("; ")}. SGP4 snapshot, approximate.`;
+      `${target.label} (${total} objects, CelesTrak) above ${where} ${when ? "at" : "right now"} (${facts.snapshot_chile} Chile time, ${facts.snapshot_utc}${when ? `; "${when.label}"` : ""}): ` +
+      `${aboveCount} above the horizon, ${sunlitAbove} of them sunlit; observer ${sample.dark ? "in darkness" : "in daylight/twilight"}. ` +
+      `Highest: ${highest.map((t) => `${t.object} ${t.elevation_degrees} deg ${t.direction}, ${t.range_km} km`).join("; ")}. SGP4 snapshot, approximate.${accuracy}`;
     return { template, facts };
   }
 
-  const grid = timeGrid(observer, now, 24, 30);
+  const sats = loaded.sats;
+  const grid = timeGrid(observer, at, 24, 30);
   const passes = [];
   for (const s of sats) {
-    const lowOrbit = altitudesKm(s.omm).perigee < NAKED_EYE_MAX_PERIGEE_KM;
-    for (const p of findPasses(s.satrec, observer, grid)) passes.push({ p, lowOrbit, name: `${s.omm.OBJECT_NAME} (NORAD ${s.omm.NORAD_CAT_ID})` });
+    const lowOrbit = s.perigeeKm < NAKED_EYE_MAX_PERIGEE_KM;
+    for (const p of findPasses(s.satrec, observer, grid)) passes.push({ p, lowOrbit, name: `${s.name} (NORAD ${s.norad})` });
   }
   const visible = passes.filter(({ p, lowOrbit }) => lowOrbit && p.visible && toDegrees(p.maxElevation) >= 25);
   visible.sort((a, b) => a.p.rise - b.p.rise);
@@ -271,9 +429,9 @@ export async function satellitePassData(fetchJson, { query, aiCity = null, now =
     next_visible_passes: list,
   };
   const template =
-    `${target.label} satellites (${sats.length} objects) over ${where}, next 24 h: ${passes.length} passes above ${MIN_ELEVATION_DEG} deg, ` +
+    `${target.label} satellites (${sats.length} objects) over ${where}, 24 h from ${when ? `${chileShort(at)} Chile time` : "now"}: ${passes.length} passes above ${MIN_ELEVATION_DEG} deg, ` +
     `${visible.length} naked-eye visible with max elevation >= 25 deg. ${visible.length ? "Next visible" : "Next passes"}: ` +
-    `${list.length ? list.map(passLine).join(" | ") : "none"}. Approximate SGP4 prediction.`;
+    `${list.length ? list.map(passLine).join(" | ") : "none"}. Approximate SGP4 prediction.${accuracy}`;
   return { template, facts };
 }
 
@@ -292,7 +450,8 @@ export function ovationAt(coordinates, latitude, longitude) {
 }
 
 export async function auroraData(fetchJson, { query, aiCity = null, now = Date.now() }) {
-  const { location, defaulted } = resolveObserver(aiCity, query);
+  const place = resolveObserver(aiCity, query);
+  const { location, defaulted } = place;
   const threshold = parseKpThreshold(query);
   const [ovation, kpForecast] = await Promise.all([fetchJson(NOAA_OVATION_URL), fetchJson(NOAA_KP_FORECAST_URL)]);
   const coords = ovation?.coordinates;
@@ -347,7 +506,7 @@ export async function auroraData(fetchJson, { query, aiCity = null, now = Date.n
     ? `KP ALERT: Kp >= ${threshold} expected in ${alerts.length} 3-hour period(s), first ${facts.kp_alert_periods[0].start_chile} Chile time (${facts.kp_alert_periods[0].start_utc}), Kp ${facts.kp_alert_periods[0].kp}.`
     : `No Kp >= ${threshold} in the NOAA 3-day forecast (max forecast Kp ${facts.max_forecast_kp} at ${facts.max_forecast_kp_at_utc}).`;
   const template =
-    `Aurora forecast for ${location.name}${defaulted ? " (default location)" : ""} (NOAA OVATION, valid ${facts.ovation_forecast_time_utc}): ` +
+    `Aurora forecast for ${place.region ? place.region.name + " (point: " + location.name + ")" : whereText(place)} (NOAA OVATION, valid ${facts.ovation_forecast_time_utc}): ` +
     `probability overhead ${local ?? "n/a"} %; strongest in the ${south ? "southern" : "northern"} oval ${hemiMax} %; ` +
     (edge === null
       ? "no oval edge >= 10 % near this longitude. "
@@ -484,7 +643,8 @@ export async function launchData(fetchJson, { now = Date.now() } = {}) {
 
 // ---------------------------------------------------------------- Starlink trains
 export async function starlinkTrainData(fetchJson, { query, aiCity = null, now = Date.now() }) {
-  const { location, defaulted } = resolveObserver(aiCity, query);
+  const place = resolveObserver(aiCity, query);
+  const { location, defaulted } = place;
   const observer = observerGd(location);
   const data = ommArray(await fetchJson(`${CELESTRAK_GP}?GROUP=last-30-days&FORMAT=JSON`), "last-30-days");
   const groups = new Map();
@@ -521,7 +681,7 @@ export async function starlinkTrainData(fetchJson, { query, aiCity = null, now =
     recent_starlink_launches: trains,
   };
   const template =
-    `Recent Starlink trains over ${location.name}${defaulted ? " (default location)" : ""}, next 72 h: ` +
+    `Recent Starlink trains over ${whereText(place)}, next 72 h: ` +
     (trains.length
       ? trains
           .map(

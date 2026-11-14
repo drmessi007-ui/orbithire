@@ -71,12 +71,18 @@ test("satellite targets: NORAD ids, named objects and CelesTrak groups", () => {
   assert.equal(parseSatelliteTarget("algo raro en el cielo").group, "visual");
 });
 
-test("observer: explicit coordinates, Chilean cities, default Osorno, unknown place rejected", () => {
+test("observer: explicit coordinates, Chilean cities, default Osorno, unknown place falls back", () => {
   assert.deepEqual(parseCoordinates("pasos sobre -40.574, -73.133"), { name: "-40.574, -73.133", latitude: -40.574, longitude: -73.133, height: 0 });
   assert.equal(parseCoordinates("NORAD 25544"), null);
   assert.equal(resolveObserver(null, "Hubble sobre Valdivia").location.name, "Valdivia, Chile");
   assert.equal(resolveObserver(null, "¿Cuántos Starlink hay sobre mí?").defaulted, true);
-  assert.throws(() => resolveObserver(null, "Hubble sobre Madrid"), { name: "UnsupportedLocationError" });
+  const madrid = resolveObserver(null, "Hubble sobre Madrid");
+  assert.equal(madrid.location.name, "Osorno, Chile");
+  assert.match(madrid.note, /"madrid" not recognised/u);
+  const chile = resolveObserver("chile", "que satelites orbitaban chile hace 2 horas");
+  assert.equal(chile.region.name, "Chile");
+  assert.equal(chile.location.name, "Osorno, Chile");
+  assert.equal(resolveObserver("Chile", "ISS sobre Santiago de Chile").location.name, "Santiago, Chile");
 });
 
 test("Sun model: noon is bright, midnight is dark, ISS shadow test is consistent", () => {
@@ -118,7 +124,7 @@ test("satellite_pass for a big group returns an overhead-now snapshot", async ()
   const many = Array.from({ length: 401 }, (_, i) => ({ ...ISS_OMM[0], NORAD_CAT_ID: 90000 + i, MEAN_ANOMALY: (i * 7) % 360 }));
   const { facts } = await satellitePassData(async () => many, { query: "cuántos starlink hay sobre mí", now: EPOCH });
   assert.equal(facts.objects_in_group, 401);
-  assert.ok(Number.isInteger(facts.above_horizon_now));
+  assert.ok(Number.isInteger(facts.above_horizon));
 });
 
 test("aurora + Kp alert threshold", async () => {

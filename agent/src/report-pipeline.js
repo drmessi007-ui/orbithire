@@ -19,6 +19,9 @@ import {
   satellitePassData,
   starlinkTrainData,
 } from "./space-data.js";
+import { parseRelativeTime, resolvePlace } from "./when-where.js";
+
+const ISS_TARGET = Object.freeze({ kind: "norad", norad: 25544, name: "ISS" });
 
 export const MAX_REPORT_CHARS = 3000;
 export const NOAA_KP_URL = "https://services.swpc.noaa.gov/json/planetary_k_index_1m.json";
@@ -91,10 +94,18 @@ export async function dataForIntent(intent, { query, aiCity, fetchJson, fetchTex
   switch (intent) {
     case "space_weather":
       return geomagneticData(fetchJson);
-    case "iss_pass":
-      return issData(fetchJson, resolveLocation(aiCity, query), now);
+    case "iss_pass": {
+      // Unknown places, regions ("sobre Chile") and other times go through the general
+      // satellite service (Osorno fallback with a note) instead of failing.
+      const location = resolveLocation(aiCity, query);
+      const place = resolvePlace(aiCity, query);
+      if (location.unknownPlace || place.region || parseRelativeTime(query, now)) {
+        return satellitePassData(fetchJson, { query, aiCity, now, fetchText, forceTarget: ISS_TARGET });
+      }
+      return issData(fetchJson, location, now);
+    }
     case "satellite_pass":
-      return satellitePassData(fetchJson, { query, aiCity, now });
+      return satellitePassData(fetchJson, { query, aiCity, now, fetchText });
     case "aurora":
       return auroraData(fetchJson, { query, aiCity, now });
     case "reentry":

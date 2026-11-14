@@ -24,7 +24,9 @@ const fetchText = withCache(
   async (url, { range } = {}) => {
     const r = await fetch(url, { headers: range ? { range } : {}, signal: AbortSignal.timeout(30000) });
     if (!r.ok) throw new Error(`${new URL(url).hostname} HTTP ${r.status}`);
-    return r.text();
+    const text = await r.text();
+    if (/^GP data has not updated/u.test(text)) throw new Error("CelesTrak 2-hour rule");
+    return text;
   },
   { store },
 );
@@ -43,6 +45,7 @@ const CASES = [
   ["¿Hay riesgo de choque entre satélites?", "conjunctions", /SOCRATES/u],
   ["¿Hay una tormenta geomagnética hoy?", "space_weather", /K-index/u],
   ["¿Cuántos satélites activos hay sobre Osorno ahora?", "satellite_pass", /All active satellites/u],
+  ["que satelites orbitaban chile hace 2 horas atrás ?", "satellite_pass", /ground point inside Chile/u],
 ];
 
 for (const [query, intent, pattern] of CASES) {

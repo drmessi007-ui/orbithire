@@ -675,7 +675,11 @@ const fetchJson = withCache(
 const fetchText = withCache(
   async (url, { range } = {}) => {
     const response = await fetchRaw(url, { accept: "text/csv, text/plain, */*", range });
-    return response.text();
+    const text = await response.text();
+    if (/^GP data has not updated/u.test(text)) {
+      throw new TransientAgentError("CelesTrak data not updated since the last download (2-hour rule)");
+    }
+    return text;
   },
   { store: publicDataStore },
 );
@@ -934,7 +938,7 @@ async function processChainRequest(requestId) {
       ...processingResults.get(requestId),
       status: "failed",
       attempts: attemptNumber,
-      message: `${reason} La solicitud queda sujeta al timeout de reembolso.`,
+      message: `${reason} No se registró recibo ni se pagó al agente: los 0,1 NEAR siguen en el contrato y puedes pedir el reembolso (claim_refund) 24 h después del pago.`,
     });
     processed.add(requestId);
   } finally {

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { UnsupportedLocationError } from "../src/iss-location.js";
 import {
   AUTH_COOLDOWN_MS,
   createLlmClient,
@@ -192,13 +191,12 @@ test("AI prose with invented numbers or links is rejected", () => {
   assert.equal(validateAiText("El índice Kp es 3,3 (19:00 UTC).", facts), "El índice Kp es 3,3 (19:00 UTC).");
 });
 
-test("unknown city proposed by a model gives the clear unsupported-city failure", async () => {
-  const ai = fakeAi(['{"intent":"iss_pass","city":"Puerto Varas","language":"es"}']);
-  await assert.rejects(run("cuándo pasa la estación espacial por Puerto Varas", [ai]), (error) => {
-    assert.ok(error instanceof UnsupportedLocationError);
-    assert.match(error.userMessage, /No reconozco la ciudad "Puerto Varas"/u);
-    return true;
-  });
+test("unknown city proposed by a model falls back to Osorno with a clear note", async () => {
+  const ai = fakeAi(['{"intent":"iss_pass","city":"Puerto Varas","language":"es"}', new LlmError("down")]);
+  const { report, meta } = await run("cuándo pasa la estación espacial por Puerto Varas", [ai]);
+  assert.equal(meta.intent, "iss_pass");
+  assert.match(report, /place "Puerto Varas" not recognised; using Osorno, Chile/u);
+  assert.match(report, /ISS \(NORAD 25544\)/u);
 });
 
 test("unsupported topics fail with the supported list; regex is never downgraded", async () => {
