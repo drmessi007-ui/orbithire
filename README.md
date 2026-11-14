@@ -75,7 +75,7 @@ The agent understands the question with an LLM (NEAR AI Cloud, then OpenAI; any 
 | "¿Cuándo veo el tren de Starlink?" | CelesTrak `last-30-days` | The three newest Starlink launches, their altitude and the next visible passes of the train |
 | "¿Hay riesgo de choque entre satélites?" | CelesTrak SOCRATES Plus (top rows of the CSV via an HTTP range request) | Closest conjunctions of the next 7 days and the highest worst-case probabilities |
 
-Observer: a Chilean city from the table (Osorno by default) or explicit decimal coordinates such as `-40.574, -73.133`. Public data is cached in memory (CelesTrak 2 h as CelesTrak requests, NOAA 5 min, Launch Library 15 min, JPL and SOCRATES 1 h).
+Observer: a Chilean city from the table (Osorno by default) or explicit decimal coordinates such as `-40.574, -73.133`. Public data is cached in memory and in `agent/data/cache` so it survives restarts (CelesTrak 2 h as CelesTrak requires, NOAA 5 min, Launch Library 15 min, JPL and SOCRATES 1 h); if a source fails, a copy up to 24 h old is used.
 
 Anything else (for example "size of the moon") fails with a clear message listing the supported kinds of question. The fee then stays in escrow and can be refunded after 24 h. The rate limit (one request per minute on testnet) still applies, because it starts when you pay.
 
@@ -128,8 +128,8 @@ cargo build --release --target wasm32-unknown-unknown
 # Agent: unit tests (chain-event verification, block scanner, retry policy)
 cd agent
 npm ci
-npm test        # → 52 tests pass, 12 live-API tests skipped (LLM calls are mocked)
-ORBITHIRE_LIVE_TESTS=1 node --test test/live-apis.test.js   # → 12 checks against the real public APIs
+npm test        # → 53 tests pass, 13 live-API tests skipped (LLM calls are mocked)
+ORBITHIRE_LIVE_TESTS=1 node --test test/live-apis.test.js   # → 13 checks against the real public APIs
 npm run check   # → syntax check of the agent sources
 ```
 

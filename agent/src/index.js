@@ -29,7 +29,7 @@ import {
 import { UnsupportedLocationError } from "./iss-location.js";
 import { createLlmProviders } from "./llm.js";
 import { buildReport, UnsupportedQueryError } from "./report-pipeline.js";
-import { withCache } from "./cached-fetch.js";
+import { diskStore, withCache } from "./cached-fetch.js";
 
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(sourceDir, "../..");
@@ -653,20 +653,32 @@ async function fetchRaw(url, { accept, range } = {}) {
   }
 }
 
-// Cached: CelesTrak asks for at most one download of the same data every 2 hours.
-const fetchJson = withCache(async (url) => {
-  const response = await fetchRaw(url, { accept: "application/json" });
-  try {
-    return await response.json();
-  } catch (error) {
-    throw new TransientAgentError(`${new URL(url).hostname} returned invalid JSON`, { cause: error });
-  }
-});
+// Cached in memory and in data/cache (survives restarts): CelesTrak allows one
+// download of the same data every 2 hours and answers repeats with plain text.
+const publicDataStore = diskStore(path.join(dataDir, "cache"));
+const fetchJson = withCache(
+  async (url) => {
+    const response = await fetchRaw(url, { accept: "application/json" });
+    const text = await response.text();
+    if (/^GP data has not updated/u.test(text)) {
+      throw new TransientAgentError("CelesTrak data not updated since the last download (2-hour rule)");
+    }
+    try {
+      return JSON.parse(text);
+    } catch (error) {
+      throw new TransientAgentError(`${new URL(url).hostname} returned invalid JSON`, { cause: error });
+    }
+  },
+  { store: publicDataStore },
+);
 
-const fetchText = withCache(async (url, { range } = {}) => {
-  const response = await fetchRaw(url, { accept: "text/csv, text/plain, */*", range });
-  return response.text();
-});
+const fetchText = withCache(
+  async (url, { range } = {}) => {
+    const response = await fetchRaw(url, { accept: "text/csv, text/plain, */*", range });
+    return response.text();
+  },
+  { store: publicDataStore },
+);
 
 async function createReport(query) {
   const { report } = await buildReport(query, {

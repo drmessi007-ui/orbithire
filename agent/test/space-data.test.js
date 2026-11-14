@@ -219,3 +219,25 @@ test("cache: CelesTrak cached for 2 h, NOAA for 5 min, concurrent calls share on
   clock = 7_200_001;
   assert.equal(await cached(url), 2);
 });
+
+test("cache: serves the last copy when the source fails (e.g. CelesTrak 2-hour rule) and reads a disk store", async () => {
+  let clock = 0;
+  let fail = false;
+  const saved = new Map();
+  const store = { get: async (k) => saved.get(k) ?? null, set: async (k, v) => saved.set(k, v) };
+  const fetcher = async () => {
+    if (fail) throw new Error("GP data has not updated");
+    return ["fresh"];
+  };
+  const url = "https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=JSON";
+  assert.deepEqual(await withCache(fetcher, { now: () => clock, store })(url), ["fresh"]);
+  // A restarted process (new cache instance) reuses the disk copy without a download.
+  fail = true;
+  clock = 60_000;
+  assert.deepEqual(await withCache(fetcher, { now: () => clock, store })(url), ["fresh"]);
+  // Past the TTL the download fails, but a copy younger than 24 h is still served.
+  clock = 3 * 3_600_000;
+  assert.deepEqual(await withCache(fetcher, { now: () => clock, store })(url), ["fresh"]);
+  clock = 25 * 3_600_000;
+  await assert.rejects(withCache(fetcher, { now: () => clock, store })(url));
+});
