@@ -38,7 +38,7 @@ RESULT_PROGRESS_LABELS.failed = "Error";
 RESULT_PROGRESS_LABELS.under_review = "En revisión";
 const TERMINAL_PROGRESS_STAGES = new Set(["completado", "failed", "under_review"]);
 const REFUND_HINT =
-  "La solicitud permanece abierta en el contrato y se puede reembolsar después del plazo.";
+  "No se registró recibo ni se cobró al agente: los 0,1 NEAR siguen en el contrato y puedes pedir el reembolso (claim_refund) 24 h después del pago.";
 
 const walletButton = document.querySelector("#wallet-button");
 const submitButton = document.querySelector("#submit-button");
@@ -209,11 +209,13 @@ function refreshProgressMeta() {
 function renderProgressSteps(stage) {
   if (!progressStages) return;
   const happyIndex = RESULT_PROGRESS_STEPS.findIndex(([id]) => id === stage);
+  // A failed request never reached the receipt step: show the error on "Procesando"
+  // (earlier steps done), not on "Registrando recibo", so the UI does not look stuck there.
   const currentIndex =
     stage === "failed" || stage === "under_review"
       ? Math.max(
           0,
-          RESULT_PROGRESS_STEPS.findIndex(([id]) => id === "registrando"),
+          RESULT_PROGRESS_STEPS.findIndex(([id]) => id === (stage === "failed" ? "procesando" : "registrando")),
         )
       : happyIndex;
   progressStages.replaceChildren();
@@ -222,7 +224,12 @@ function renderProgressSteps(stage) {
     item.className = "progress-stage";
     item.dataset.stage = id;
     if (stage === "failed" && index === currentIndex) item.dataset.state = "error";
-    else if (stage === "completado" || (happyIndex !== -1 && index < happyIndex) || (stage === "under_review" && index <= currentIndex)) {
+    else if (
+      stage === "completado" ||
+      (happyIndex !== -1 && index < happyIndex) ||
+      (stage === "under_review" && index <= currentIndex) ||
+      (stage === "failed" && index < currentIndex)
+    ) {
       item.dataset.state = "done";
     } else if (happyIndex !== -1 && index === happyIndex) {
       item.dataset.state = "current";
