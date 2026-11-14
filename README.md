@@ -58,15 +58,26 @@ AI agents that sell a service need a way to get paid that does not require the b
 
 ### Supported questions
 
-The agent understands the question with an LLM (NEAR AI Cloud, then OpenAI; any language), falling back to simple keyword rules (Spanish or English). It is not a general chatbot: it only answers the two topics below, always from real data.
+The agent understands the question with an LLM (NEAR AI Cloud, then OpenAI; any language), falling back to simple keyword rules (Spanish or English). It is not a general chatbot: it only answers the request types below, always from real public data. Every request type uses the same 0.1 NEAR escrow, on-chain verification and receipt flow; only the data step differs.
 
 | Ask something like | Data source | Result |
 | --- | --- | --- |
 | "¿Hay tormenta geomagnética hoy?" / "space weather now?" | NOAA SWPC `planetary_k_index_1m.json` | Latest Kp and whether it is storm level (Kp ≥ 5) |
 | "¿A qué hora pasa la ISS sobre Santiago?" / "ISS over Punta Arenas" / "ISS pass" | CelesTrak GP elements for NORAD 25544 + city table in `agent/src/iss-location.js` | Next pass window over that city in Chile time (America/Santiago) and UTC, max elevation (Osorno when no city is named) |
 | "ISS sobre Puerto Varas" (city not in the list) | — | Fails with `No reconozco la ciudad "puerto varas"…` and the list of supported cities; refundable after 24 h |
+| "¿Cuándo pasa el Hubble sobre Osorno?" / "Pasos visibles de la ISS" / "NORAD 33591 sobre Santiago" / "Tiangong sobre -40.574, -73.133" | CelesTrak GP elements by NORAD id (`CATNR`), SGP4 with `satellite.js` | Next passes in 72 h (rise/set in Chile time + UTC, max elevation, directions) and the next **naked-eye visible** passes (satellite sunlit while the Sun is below −6° at the observer; up to 7 days ahead). Geostationary objects are reported as always above the horizon. Named objects: ISS, Hubble, Tiangong |
+| "¿Qué satélites brillantes puedo ver esta noche?" / "satélites GPS sobre Valdivia" / "satélites meteorológicos" | CelesTrak groups `visual`, `gps-ops`, `weather`, `stations` | Visible passes of the group in the next 24 h (high-orbit groups such as GPS are flagged as too faint for the naked eye) |
+| "¿Cuántos Starlink hay sobre mí?" / "¿Cuántos satélites activos hay sobre Osorno ahora?" | CelesTrak groups `starlink`, `active` (10,000+ objects) | Snapshot: how many are above the horizon right now, how many sunlit, and the five highest |
+| "Pronóstico de auroras en Punta Arenas, alerta Kp 6" | NOAA SWPC OVATION (`ovation_aurora_latest.json`) + 3-day Kp forecast | Aurora probability overhead, edge of the oval at your longitude, whether it may be seen low on the horizon, and a **Kp alert** for forecast periods at or above the threshold (default 5) |
+| "¿Qué satélites van a reingresar?" / "basura espacial que va a caer" | CelesTrak `SPECIAL=DECAYING` | Lowest-perigee decaying objects with a crude linear decay estimate (clearly labelled as not official) |
+| "¿Hay asteroides cerca de la Tierra?" | NASA/JPL SBDB Close-Approach Data API (no key) | Close approaches within 0.05 au in the next 30 days: time, distance in lunar distances and km, speed, size range from H |
+| "Próximos lanzamientos de cohetes" | Launch Library 2 (The Space Devs, `lldev` endpoint) | Next 5 launches: rocket, provider, pad, time in Chile + UTC, status, webcast link |
+| "¿Cuándo veo el tren de Starlink?" | CelesTrak `last-30-days` | The three newest Starlink launches, their altitude and the next visible passes of the train |
+| "¿Hay riesgo de choque entre satélites?" | CelesTrak SOCRATES Plus (top rows of the CSV via an HTTP range request) | Closest conjunctions of the next 7 days and the highest worst-case probabilities |
 
-Anything else (for example "size of the moon") fails with a clear message listing the two supported kinds of question. The fee then stays in escrow and can be refunded after 24 h. The 1-hour rate limit still applies, because it starts when you pay.
+Observer: a Chilean city from the table (Osorno by default) or explicit decimal coordinates such as `-40.574, -73.133`. Public data is cached in memory (CelesTrak 2 h as CelesTrak requests, NOAA 5 min, Launch Library 15 min, JPL and SOCRATES 1 h).
+
+Anything else (for example "size of the moon") fails with a clear message listing the supported kinds of question. The fee then stays in escrow and can be refunded after 24 h. The rate limit (one request per minute on testnet) still applies, because it starts when you pay.
 
 ## AI: NEAR AI Cloud (with OpenAI fallback)
 
@@ -117,7 +128,8 @@ cargo build --release --target wasm32-unknown-unknown
 # Agent: unit tests (chain-event verification, block scanner, retry policy)
 cd agent
 npm ci
-npm test        # → 36 tests, 0 failures (LLM calls are mocked)
+npm test        # → 52 tests pass, 12 live-API tests skipped (LLM calls are mocked)
+ORBITHIRE_LIVE_TESTS=1 node --test test/live-apis.test.js   # → 12 checks against the real public APIs
 npm run check   # → syntax check of the agent sources
 ```
 
@@ -192,7 +204,7 @@ More detail: [`docs/SECURITY.md`](docs/SECURITY.md).
 - **Contracts:** `near-sdk` 5.30.1 (features `legacy`, `unit-testing` for tests), `borsh` 1.8.1, `serde_json` 1.
 - **Agent:** `near-api-js` 7.2.0, `satellite.js` 7.2.0, `@typesafe-ai/sdk` 0.6.0 (Jev guard), `dotenv` 18.0.10. NEAR AI Cloud and OpenAI via plain `fetch` (no SDK). Node.js built-ins (`node:http`, `node:test`).
 - **Frontend:** `@near-wallet-selector/core` and `@near-wallet-selector/meteor-wallet` 10.1.4 (loaded from jsDelivr). No framework, no build step.
-- **Data:** NOAA SWPC public JSON and CelesTrak GP elements (no API keys).
+- **Data:** NOAA SWPC public JSON (Kp, OVATION aurora, Kp forecast), CelesTrak GP elements and SOCRATES, NASA/JPL Close-Approach Data API, Launch Library 2 by The Space Devs (no API keys).
 - **Templates:** none beyond standard `near-sdk` contract structure.
 - **AI-written code:** most of the code and docs were written with AI coding assistants: GitHub Copilot in VS Code for the contracts, agent and frontend, and Grok Bot for the block-scanner/state-sweep fixes, live progress stages, the LLM integration and this repository's packaging. At runtime the agent calls an LLM (NEAR AI Cloud, falling back to OpenAI) to classify questions and word reports (see "AI: NEAR AI Cloud (with OpenAI fallback)"). The author reviewed, deployed and operates it.
 
