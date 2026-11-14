@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "check": "node --check src/index.js && node --check src/chain-events.js && node --check src/retry-policy.js && node --check src/llm.js && node --check src/report-pipeline.js",
+    "check": "node --check src/index.js && node --check src/space-data.js && node --check src/sky-math.js && node --check src/cached-fetch.js && node --check src/chain-events.js && node --check src/retry-policy.js && node --check src/llm.js && node --check src/report-pipeline.js",
     "test": "node --test"
   },
   "dependencies": {

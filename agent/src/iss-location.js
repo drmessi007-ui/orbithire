@@ -59,6 +59,10 @@ const NON_PLACE_WORDS = new Set([
   "iss", "estacion", "espacial", "internacional", "international", "space", "station", "pasa",
   "pasara", "pasar", "visible", "verla", "ver", "si", "no", "y", "o", "de", "del", "favor", "encima",
   "please", "next", "proximas", "proxima", "proximo", "proximos", "cima", "arriba",
+  // Words used by the satellite / aurora / Starlink services.
+  "hubble", "hst", "tiangong", "starlink", "satelite", "satelites", "satellite", "satellites", "norad",
+  "gps", "noches", "dias", "semana", "aurora", "auroras", "mi", "ti", "now", "ahora", "orbita", "lat",
+  "latitud", "coordenadas", "coordinates", "los", "las",
 ]);
 
 // Lookahead keeps matches overlapping ("por encima de X" also tries "de X").
